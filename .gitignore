@@ -27,3 +27,5 @@ Thumbs.db
 # Data files (optional — uncomment if datasets get large; Git isn't meant for big files)
 # *.csv
 # *.zip
+
+cache/
