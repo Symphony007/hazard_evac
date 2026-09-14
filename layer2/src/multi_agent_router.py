@@ -83,6 +83,7 @@ class RoutingResult:
     max_edge_load: int = 0
     num_hazard_reroutes: int = 0
     num_unique_routes: int = 0
+    failure_reasons: Dict[int, str] = field(default_factory=dict)
     congestion_stats: dict = field(default_factory=dict)
 
 
@@ -164,8 +165,10 @@ def route_all_agents(
         try:
             route = compute_route(G_work, origin, dest, weight="congestion_cost")
         except NoRouteError:
-            logger.warning("Agent %d: no route from %d to %d", idx, origin, dest)
+            reason = f"No path exists between origin node {origin} and dest node {dest} (network disconnected or blocked by hazard)"
+            logger.warning("[FAILED] Agent %d: %s", idx, reason)
             result.failed_agents.append(idx)
+            result.failure_reasons[idx] = reason
             continue
 
         # 5. Check if hazard forced a different route than pure shortest
@@ -259,7 +262,10 @@ def route_all_agents_naive(
         try:
             route = compute_route(G_work, origin, dest, weight="length")
         except NoRouteError:
+            reason = f"No path exists between origin node {origin} and dest node {dest} (network disconnected or blocked by hazard)"
+            logger.warning("[FAILED] Agent %d (naive): %s", idx, reason)
             result.failed_agents.append(idx)
+            result.failure_reasons[idx] = reason
             continue
 
         congestion_model.add_route(route)

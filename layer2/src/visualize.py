@@ -36,16 +36,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 AGENT_COLOURS = [
-    "#2980b9",  # blue
-    "#27ae60",  # green
-    "#8e44ad",  # purple
-    "#e67e22",  # orange
-    "#1abc9c",  # teal
-    "#e84393",  # pink
-    "#00b894",  # mint
-    "#6c5ce7",  # indigo
-    "#fdcb6e",  # gold
-    "#00cec9",  # cyan
+    "#1e3799",  # deep royal blue
+    "#8e44ad",  # royal purple
+    "#d35400",  # pumpkin / burnt orange
+    "#c0398f",  # dark magenta / orchid
+    "#006266",  # dark pine teal
+    "#3c40c6",  # electric indigo
+    "#6d4c41",  # warm chocolate brown
+    "#0652dd",  # vibrant cobalt blue
+    "#b8860b",  # dark goldenrod (rich amber)
+    "#2c3e50",  # dark slate navy
 ]
 
 
@@ -146,15 +146,20 @@ def render_multi_agent_map(
     -------
     folium.Map
     """
-    # --- Centre the map on the graph's mean coordinates ---
-    all_lats = [graph.nodes[n]["y"] for n in graph.nodes]
-    all_lons = [graph.nodes[n]["x"] for n in graph.nodes]
-    centre_lat = sum(all_lats) / len(all_lats)
-    centre_lon = sum(all_lons) / len(all_lons)
+    # --- Centre the map on the hazard center point (or network centroid) ---
+    if hazard_state is not None and graph.has_node(hazard_state.origin_node):
+        h_node = hazard_state.origin_node
+        centre_lat = graph.nodes[h_node]["y"]
+        centre_lon = graph.nodes[h_node]["x"]
+    else:
+        all_lats = [graph.nodes[n]["y"] for n in graph.nodes]
+        all_lons = [graph.nodes[n]["x"] for n in graph.nodes]
+        centre_lat = sum(all_lats) / len(all_lats)
+        centre_lon = sum(all_lons) / len(all_lons)
 
     m = folium.Map(
         location=[centre_lat, centre_lon],
-        zoom_start=14,
+        zoom_start=15,
         tiles="OpenStreetMap",
     )
 
@@ -174,8 +179,8 @@ def render_multi_agent_map(
             m, graph, route,
             colour=colour,
             label=f"Agent {idx}",
-            weight=3,
-            opacity=0.7,
+            weight=4,
+            opacity=0.85,
         )
 
     # --- 4. Add origin/destination markers for a few representative agents ---
@@ -326,10 +331,11 @@ def _add_agent_markers(
             folium.CircleMarker(
                 location=[graph.nodes[origin]["y"], graph.nodes[origin]["x"]],
                 radius=6,
-                color="#27ae60",
+                color="#1b5e20",
                 fill=True,
                 fill_color="#27ae60",
-                fill_opacity=0.8,
+                fill_opacity=0.9,
+                weight=2,
                 tooltip=f"Origin (Agent {idx})",
             ).add_to(m)
 
@@ -338,9 +344,10 @@ def _add_agent_markers(
             folium.CircleMarker(
                 location=[graph.nodes[dest]["y"], graph.nodes[dest]["x"]],
                 radius=8,
-                color="#e74c3c",
+                color="#7f1d1d",
                 fill=True,
                 fill_color="#e74c3c",
                 fill_opacity=0.9,
+                weight=2,
                 tooltip=f"Destination (safe zone)",
             ).add_to(m)

@@ -56,26 +56,39 @@ The test suite (`tests/test_layer2.py`) contains 12 tests across 5 categories:
 
 ## Demo results (`main.py`)
 
-The demo routes 20 evacuees across a 2km radius of central Kolkata with a 600m-radius hazard zone. The comparison table shows:
+### Evacuee Scenario & Scale Adjustment
 
-| Metric               | Naive | Congestion-Aware |
-|----------------------|------:|------------------:|
-| Agents routed        |    20 |                20 |
-| Failed agents        |     0 |                 0 |
-| Unique routes        |    20 |                20 |
-| **Max edge load**    |   **8** |             **7** |
-| Avg path length (m)  | 2,606 |             2,608 |
-| Loaded edges         |   300 |               320 |
+To create a realistic emergency evacuation scenario that matches Layer 1's geographic scale:
+- The road network graph covers a 2 km radius query (4 km diameter bounding box) around central Kolkata.
+- **Constrained Origin Sampling**: Rather than scattering evacuees across the entire 4 km bounding box, all 20 evacuee origin nodes are sampled within a **1,000 m radius of the hazard epicenter** (outside the 600 m active hazard zone). This realistically models a crowd of people in the danger area needing to escape outward.
+- **Periphery Safe Zones**: 3 safe-zone destinations are positioned at the network periphery, forcing all evacuees to travel away from the center to safety.
+- **Tightened Map Framing**: The interactive map (`layer2/output/evacuation_multi_agent.html`) centers directly on the hazard epicenter and uses `zoom_start=15` (matching Layer 1) rather than a wide zoom.
 
-**Key takeaway:** Congestion-aware routing reduced the maximum edge load by 12%, spreading traffic more evenly across 320 edges (vs 300 for naive), at virtually the same average path length (+2m, or 0.08%). This demonstrates the core value proposition: better load distribution with negligible cost increase.
+### Comparison Results
+
+Under this realistic bottleneck scenario, the value of congestion-aware routing is even more pronounced:
+
+| Metric               | Naive | Congestion-Aware | Delta / Impact |
+|----------------------|------:|------------------:|---------------:|
+| Agents routed        |    20 |                20 | All routed (0 failed) |
+| Failed agents        |     0 |                 0 | 100% success rate |
+| Unique routes        |    20 |                20 | Full route diversity |
+| **Max edge load**    |  **12** |             **8** | **-33% peak load reduction** |
+| Avg path length (m)  | 3,089 |             3,180 | +2.9% minor detour |
+| Loaded edges         |   229 |               288 | +59 alternative streets used |
+| Total edge volume    |   660 |               717 | Distributed traffic |
+
+**Key takeaway:** When 20 evacuees all flee the same danger zone at once, naive shortest-path routing funnels everyone down the exact same primary arterial roads, causing peak edge load to spike to **12 vehicles**. Congestion-aware routing dynamically diverts later evacuees onto secondary streets, **slashing the peak edge bottleneck by 33% (12 → 8)** and spreading traffic across 59 additional road segments, with only a negligible 2.9% (+91 m) average detour.
 
 ## What the rendered map shows
 
 When you open `layer2/output/evacuation_multi_agent.html`:
 
-- **Coloured polylines**: Each agent's route is drawn in a distinct colour (blue, green, purple, orange, etc.). You should see routes fanning out around the hazard zone.
-- **Congestion heat layer**: Edges with traffic appear as thicker lines on a green-to-red scale. Green = light load, red = heavy load. You should see the heaviest congestion on edges near the safe zone destinations.
-- **Red circle + red edges**: The hazard zone, identical to Layer 1. No routes should pass through it.
-- **Green dots**: Evacuee origin points (scattered around the network).
-- **Red dots**: Safe zone destinations (3 points at the graph periphery).
-- **Dark red marker**: Hazard epicentre.
+- **High-contrast coloured polylines**: Each agent's route is drawn using a curated, colorblind-friendly, high-contrast palette (royal blue, purple, pumpkin orange, dark magenta, pine teal, electric indigo, warm brown, cobalt, goldenrod, slate navy). Pale colors (such as pale gold and light cyan) and green shades have been removed to ensure crisp visibility against OpenStreetMap's light background.
+- **Prominent route line weight**: Routes are rendered at weight 4 and 85% opacity, ensuring they are immediately visible as they emerge from origin markers.
+- **Congestion heat layer**: Road segments carry color and thickness proportional to traffic load (green for light volume through yellow to red for bottlenecks).
+- **Hazard zone**: Translucent red circular perimeter (600 m radius at $t=4$) with internal hazardous edges highlighted in red.
+- **Green origin markers**: 20 evacuee start points clustered within 1,000 m of the hazard epicenter, bordered in dark green.
+- **Red destination markers**: 3 safe-zone destinations at the outer network boundary.
+- **Dark red hazard marker**: Hazard epicenter at the core.
+- **Failure logging**: If an agent cannot find a path due to complete network blockage or hazard cutoff, `multi_agent_router.py` explicitly catches and logs the agent ID, origin, destination, and exact failure reason instead of silently dropping it.

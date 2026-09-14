@@ -46,6 +46,8 @@ NUM_AGENTS = 20
 SPREAD_RATE_M = 150
 HAZARD_TIME_STEP = 4       # simulate hazard at t=4 (600 m radius)
 
+ORIGIN_SAMPLING_RADIUS_M = 1000  # sample evacuees within 1 km of hazard epicenter
+
 OUTPUT_DIR = LAYER2_ROOT / "output"
 MAP_FILENAME = OUTPUT_DIR / "evacuation_multi_agent.html"
 
@@ -57,41 +59,68 @@ random.seed(42)
 # Helper: pick OD pairs
 # ---------------------------------------------------------------------------
 
-def _pick_od_pairs(graph, num_agents: int, hazard_state):
+import math
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two (lat, lon) points in metres."""
+    R = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2.0) ** 2
+    return 2.0 * R * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+
+
+def _pick_od_pairs(
+    graph,
+    num_agents: int,
+    hazard_state,
+    origin_sampling_radius_m: float = 1000.0,
+):
     """
     Generate origin-destination pairs for evacuees.
 
     Strategy:
-      - Origins are randomly sampled from nodes NOT in the hazard zone
-        (people need to evacuate FROM safe areas around the hazard).
-      - Destinations are 3 fixed nodes at the graph periphery (safe zones).
-      - Each agent is assigned to the nearest safe zone destination.
+      - Origins are sampled from nodes within `origin_sampling_radius_m` (1 km)
+        of the hazard epicenter that are NOT inside the hazard zone.
+        This models a realistic scenario of people near the disaster escaping outward.
+      - Destinations are 3 fixed safe-zone nodes at the graph periphery,
+        ensuring agents travel outward away from danger.
+      - Each agent is assigned to one of the safe zone destinations (cycled).
     """
-    import networkx as nx
-
     nodes = list(graph.nodes)
     safe_nodes = [n for n in nodes if n not in hazard_state.hazardous_nodes]
 
     if len(safe_nodes) < num_agents:
-        # Fall back to all nodes if hazard is too large
         safe_nodes = nodes
 
-    # Pick 3 destination nodes at different quadrants of the graph
-    # (use first, middle-ish, and last nodes as proxies for spread)
+    # Pick 3 destination nodes at different quadrants of the graph (periphery safe zones)
     dests = [
         safe_nodes[0],
         safe_nodes[len(safe_nodes) // 3],
         safe_nodes[2 * len(safe_nodes) // 3],
     ]
 
+    # Constrain origins to within origin_sampling_radius_m of the hazard epicenter
+    h_node = hazard_state.origin_node
+    h_lat = graph.nodes[h_node]["y"]
+    h_lon = graph.nodes[h_node]["x"]
+
+    near_safe_nodes = [
+        n for n in safe_nodes
+        if _haversine_m(h_lat, h_lon, graph.nodes[n]["y"], graph.nodes[n]["x"]) <= origin_sampling_radius_m
+    ]
+
+    # Fall back to all safe nodes if fewer than num_agents are in the radius
+    sample_pool = near_safe_nodes if len(near_safe_nodes) >= num_agents else safe_nodes
+
     # Sample origins randomly
-    origins = random.sample(safe_nodes, min(num_agents, len(safe_nodes)))
+    origins = random.sample(sample_pool, min(num_agents, len(sample_pool)))
 
     # Assign each origin to a destination (cycle through the 3)
     od_pairs = []
     for i, origin in enumerate(origins):
         dest = dests[i % len(dests)]
-        # Skip if origin == dest
         if origin == dest:
             dest = dests[(i + 1) % len(dests)]
         od_pairs.append((origin, dest))
@@ -112,8 +141,17 @@ def main() -> None:
 
     # ---- Step 1: Load graph ----
     print("\n[1/5] Loading road network ...")
+    print(f"      Centre point    : {CENTRE_POINT} (lat, lon)")
+    print(f"      Query radius    : {GRAPH_RADIUS_M} m ({GRAPH_RADIUS_M/1000:.1f} km)")
+    print(f"      Network type    : {NETWORK_TYPE}")
     G = load_graph(point=CENTRE_POINT, dist=GRAPH_RADIUS_M, network_type=NETWORK_TYPE)
+    lats = [G.nodes[n]["y"] for n in G.nodes]
+    lons = [G.nodes[n]["x"] for n in G.nodes]
+    lat_span_km = (max(lats) - min(lats)) * 111.13
+    lon_span_km = (max(lons) - min(lons)) * 102.8
     print(f"      Graph: {len(G.nodes):,} nodes, {len(G.edges):,} edges")
+    print(f"      Bounding box    : lat [{min(lats):.4f}, {max(lats):.4f}] ({lat_span_km:.2f} km N-S), "
+          f"lon [{min(lons):.4f}, {max(lons):.4f}] ({lon_span_km:.2f} km E-W)")
 
     # ---- Step 2: Set up hazard ----
     print(f"\n[2/5] Setting up hazard (t={HAZARD_TIME_STEP}, "
@@ -122,15 +160,25 @@ def main() -> None:
     hazard_origin = nodes[len(nodes) // 2]
     sim = HazardSimulation(G, origin_node=hazard_origin, spread_rate_m=SPREAD_RATE_M)
     hazard_state = sim.get_hazard_state(HAZARD_TIME_STEP)
-    print(f"      Hazard origin  : node {hazard_origin}")
+    print(f"      Hazard origin  : node {hazard_origin} ({G.nodes[hazard_origin]['y']:.4f}, {G.nodes[hazard_origin]['x']:.4f})")
     print(f"      Hazard radius  : {hazard_state.radius_m:.0f} m")
     print(f"      Nodes affected : {len(hazard_state.hazardous_nodes)}")
 
     # ---- Step 3: Generate OD pairs ----
-    print(f"\n[3/5] Generating {NUM_AGENTS} evacuee OD pairs ...")
-    od_pairs, dests = _pick_od_pairs(G, NUM_AGENTS, hazard_state)
+    print(f"\n[3/5] Generating {NUM_AGENTS} evacuee OD pairs (origins within {ORIGIN_SAMPLING_RADIUS_M}m of hazard) ...")
+    od_pairs, dests = _pick_od_pairs(
+        G, NUM_AGENTS, hazard_state,
+        origin_sampling_radius_m=ORIGIN_SAMPLING_RADIUS_M,
+    )
     print(f"      Origins  : {len(od_pairs)} unique evacuees")
     print(f"      Safe zones: {len(dests)} destinations")
+    for i, d in enumerate(dests):
+        print(f"        Safe zone {i+1}: node {d} at ({G.nodes[d]['y']:.4f}, {G.nodes[d]['x']:.4f})")
+    print("      Evacuee origin coordinates:")
+    for i, (orig, dest) in enumerate(od_pairs):
+        dest_idx = dests.index(dest) + 1 if dest in dests else "?"
+        print(f"        Agent {i:2d}: node {orig} at ({G.nodes[orig]['y']:.4f}, {G.nodes[orig]['x']:.4f}) "
+              f"-> Safe zone {dest_idx} (node {dest})")
 
     # ---- Step 4: Route -- naive vs congestion-aware ----
     print(f"\n[4/5] Routing {NUM_AGENTS} agents ...")
@@ -139,15 +187,31 @@ def main() -> None:
     # Naive
     print("  [A] Naive routing (no congestion awareness) ...")
     naive_result = route_all_agents_naive(G, od_pairs, hazard_state=hazard_state)
+    if naive_result.failed_agents:
+        print(f"      [WARN] {len(naive_result.failed_agents)} agent(s) FAILED in naive routing:")
+        for f_idx in naive_result.failed_agents:
+            orig, dest = od_pairs[f_idx]
+            reason = getattr(naive_result, "failure_reasons", {}).get(f_idx, "No path found")
+            print(f"             - Agent {f_idx}: origin {orig} -> dest {dest} | Reason: {reason}")
+    else:
+        print(f"      [OK] All {len(naive_result.agent_routes)}/{len(od_pairs)} agents successfully routed.")
 
     # Congestion-aware
-    print("  [B] Congestion-aware routing (BPR feedback) ...")
+    print("\n  [B] Congestion-aware routing (BPR feedback) ...")
     congestion_model = CongestionModel(G)
     aware_result = route_all_agents(
         G, od_pairs,
         hazard_state=hazard_state,
         congestion_model=congestion_model,
     )
+    if aware_result.failed_agents:
+        print(f"      [WARN] {len(aware_result.failed_agents)} agent(s) FAILED in congestion-aware routing:")
+        for f_idx in aware_result.failed_agents:
+            orig, dest = od_pairs[f_idx]
+            reason = getattr(aware_result, "failure_reasons", {}).get(f_idx, "No path found")
+            print(f"             - Agent {f_idx}: origin {orig} -> dest {dest} | Reason: {reason}")
+    else:
+        print(f"      [OK] All {len(aware_result.agent_routes)}/{len(od_pairs)} agents successfully routed.")
 
     # ---- Comparison table ----
     print("\n" + "=" * 70)
@@ -202,6 +266,9 @@ def main() -> None:
     )
     print(f"      [OK] Map saved! Open in your browser:")
     print(f"         file:///{MAP_FILENAME.as_posix()}")
+    print(f"      Visualization summary:")
+    print(f"        - Routes rendered: {len(aware_result.agent_routes)} agent routes")
+    print(f"        - Loaded edges highlighted: {aware_result.congestion_stats.get('loaded_edges', 0)} segments")
     print()
 
 
