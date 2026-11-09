@@ -1,6 +1,0 @@
-osmnx>=2.0
-networkx>=3.0
-folium>=0.19
-requests>=2.31
-matplotlib>=3.8
-numpy>=1.26
