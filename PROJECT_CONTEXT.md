@@ -46,3 +46,16 @@ data layer (OSMnx graph)
 ## Team
 4-person team, 6-week first phase, goal is a strong mid-semester demo.
 
+## Status and known assumptions (update as we go)
+- Done: Task 1 (graph loader), Task 2 (flood hazard simulator).
+- Terrain is SYNTHETIC (generated, not a real DEM). A real DEM and a
+  flood calibration against a documented Kolkata event are planned as
+  "Task 2b"; the ElevationProvider interface in src/hazard/terrain.py
+  is the swap point. Never describe the terrain as real.
+- Flood spread parameters are assumptions, not calibrated values.
+- Flow capacity is nearly uniform (most edges are 1 lane because OSM
+  lane tags are sparse); road-type lane defaults are planned for Task 5.
+- The flood front (~0.5 m/s at default settings) is much slower than
+  vehicles, so static-routing failures depend on departure delay,
+  route length, flood speed and (from Task 5) congestion.
+

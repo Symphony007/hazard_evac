@@ -45,6 +45,23 @@ class HazardConfig:
     horizon_min: float = 60.0
 
 
+@dataclass
+class ScenarioConfig:
+    """Configuration for evacuation scenario generation and experiment sweep."""
+
+    scenario_seed: int = 11
+    n_exits: int = 6
+    exit_min_dist_from_center_m: float = 1200.0
+    n_evacuees: int = 300
+    depart_window_min: float = 20.0
+    vehicle_speed_scale: float = 0.5
+    sf_floor: float = 0.05
+    flood_speed_sweep_m_per_min: list[float] = field(
+        default_factory=lambda: [30.0, 60.0, 120.0, 240.0]
+    )
+    example_flood_speed_m_per_min: float = 120.0
+
+
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
     """Load a YAML config file into a dataclass.
 

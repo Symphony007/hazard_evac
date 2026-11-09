@@ -1,0 +1,10 @@
+scenario_seed: 11
+n_exits: 6
+exit_min_dist_from_center_m: 1200
+n_evacuees: 300
+depart_window_min: 20
+vehicle_speed_scale: 0.5     # urban crawl, fraction of OSM speed (ASSUMPTION)
+sf_floor: 0.05
+flood_speed_sweep_m_per_min: [30, 60, 120, 240]
+example_flood_speed_m_per_min: 120
+
