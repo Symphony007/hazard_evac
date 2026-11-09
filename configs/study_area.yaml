@@ -1,0 +1,10 @@
+name: tollygunge_test
+center_lat: 22.4985
+center_lon: 88.3450
+dist_m: 1500
+network_type: drive
+default_lanes: 1
+capacity_per_lane_veh_per_km: 40
+min_edge_capacity: 2
+cache_path: data/graph.graphml
+
