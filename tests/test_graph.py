@@ -71,3 +71,20 @@ def test_capacity_minimum(graph: nx.MultiDiGraph, cfg: StudyAreaConfig) -> None:
             f"Edge ({u},{v},{k}) capacity {cap} < min {cfg.min_edge_capacity}"
         )
 
+
+def test_flow_capacity(graph: nx.MultiDiGraph, cfg: StudyAreaConfig) -> None:
+    """Every edge has flow_capacity > 0, equal to lanes_n * flow_rate."""
+    for u, v, k, data in graph.edges(keys=True, data=True):
+        assert "flow_capacity" in data, f"Edge ({u},{v},{k}) missing 'flow_capacity'"
+        assert "lanes_n" in data, f"Edge ({u},{v},{k}) missing 'lanes_n'"
+
+        fc = data["flow_capacity"]
+        ln = data["lanes_n"]
+        assert fc > 0, f"Edge ({u},{v},{k}) flow_capacity = {fc} (expected > 0)"
+        assert isinstance(ln, int), f"Edge ({u},{v},{k}) lanes_n type {type(ln)}"
+
+        expected = float(ln * cfg.flow_rate_veh_per_min_per_lane)
+        assert fc == pytest.approx(expected), (
+            f"Edge ({u},{v},{k}) flow_capacity {fc} != "
+            f"lanes_n({ln}) * rate({cfg.flow_rate_veh_per_min_per_lane}) = {expected}"
+        )

@@ -21,25 +21,47 @@ class StudyAreaConfig:
     default_lanes: int = 1
     capacity_per_lane_veh_per_km: int = 40
     min_edge_capacity: int = 2
+    flow_rate_veh_per_min_per_lane: int = 12
     cache_path: str = "data/graph.graphml"
 
 
-def load_config(path: str | Path) -> StudyAreaConfig:
-    """Load a YAML config file and return a StudyAreaConfig dataclass.
+@dataclass
+class HazardConfig:
+    """Configuration for the flood hazard simulator."""
+
+    terrain_seed: int = 7
+    terrain_n_bumps: int = 6
+    terrain_range_m: float = 3.0
+    seed: int = 42
+    n_sources: int = 2
+    source_selection: str = "lowest_elevation"
+    explicit_sources: list[list[float]] = field(default_factory=list)
+    min_source_separation_m: float = 600.0
+    spread_speed_m_per_min: float = 30.0
+    terrain_gamma: float = 1.0
+    noise_sigma: float = 0.15
+    ramp_min: float = 3.0
+    min_speed_factor: float = 0.2
+    horizon_min: float = 60.0
+
+
+def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
+    """Load a YAML config file into a dataclass.
 
     Parameters
     ----------
     path : str or Path
         Path to the YAML configuration file.
+    config_cls : type
+        Dataclass to instantiate (default: StudyAreaConfig).
 
     Returns
     -------
-    StudyAreaConfig
+    dataclass instance
         Parsed configuration.
     """
     path = Path(path)
     with open(path, "r", encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f)
 
-    return StudyAreaConfig(**raw)
-
+    return config_cls(**raw)

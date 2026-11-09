@@ -1,0 +1,15 @@
+terrain_seed: 7
+terrain_n_bumps: 6
+terrain_range_m: 3.0
+seed: 42
+n_sources: 2
+source_selection: lowest_elevation
+explicit_sources: []
+min_source_separation_m: 600
+spread_speed_m_per_min: 30
+terrain_gamma: 1.0
+noise_sigma: 0.15
+ramp_min: 3
+min_speed_factor: 0.2
+horizon_min: 60
+

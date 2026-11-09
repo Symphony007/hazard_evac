@@ -2,8 +2,9 @@
 
 Builds, caches, and loads a drivable road graph with per-edge attributes
 needed by the hazard and routing layers:
-  length (m), speed_kph (km/h), travel_time (s), capacity (vehicles),
-  free_flow_time (s), and node/edge coordinates.
+  length (m), speed_kph (km/h), travel_time (s), free_flow_time (s),
+  capacity (vehicles), lanes_n (int), flow_capacity (veh/min),
+  and node/edge coordinates.
 """
 
 from __future__ import annotations
@@ -60,18 +61,36 @@ def _parse_lanes(lanes_raw: str | list | int | float | None, default: int) -> in
     return default
 
 
+def _add_lanes_n(G: nx.MultiDiGraph, cfg: "StudyAreaConfig") -> None:
+    """Store the parsed lane count as *lanes_n* (int) on every edge."""
+    for u, v, k, data in G.edges(keys=True, data=True):
+        data["lanes_n"] = _parse_lanes(data.get("lanes"), cfg.default_lanes)
+
+
 def _add_capacity(G: nx.MultiDiGraph, cfg: "StudyAreaConfig") -> None:
     """Add an integer *capacity* attribute to every edge.
 
-    capacity = lanes × (length_m / 1000) × capacity_per_lane_veh_per_km,
+    capacity = lanes_n × (length_m / 1000) × capacity_per_lane_veh_per_km,
     rounded, and never below min_edge_capacity.
+    Requires *lanes_n* to be set first (see :func:`_add_lanes_n`).
     """
     for u, v, k, data in G.edges(keys=True, data=True):
-        lanes = _parse_lanes(data.get("lanes"), cfg.default_lanes)
         length_m: float = data["length"]
-        raw_cap = lanes * (length_m / 1000.0) * cfg.capacity_per_lane_veh_per_km
+        raw_cap = data["lanes_n"] * (length_m / 1000.0) * cfg.capacity_per_lane_veh_per_km
         capacity = max(round(raw_cap), cfg.min_edge_capacity)
         data["capacity"] = capacity
+
+
+def _add_flow_capacity(G: nx.MultiDiGraph, cfg: "StudyAreaConfig") -> None:
+    """Add *flow_capacity* (veh/min) to every edge.
+
+    flow_capacity = lanes_n × flow_rate_veh_per_min_per_lane.
+    Requires *lanes_n* to be set first.
+    """
+    for u, v, k, data in G.edges(keys=True, data=True):
+        data["flow_capacity"] = float(
+            data["lanes_n"] * cfg.flow_rate_veh_per_min_per_lane
+        )
 
 
 def _add_free_flow_time(G: nx.MultiDiGraph) -> None:
@@ -91,7 +110,7 @@ def build_graph(cfg: "StudyAreaConfig") -> nx.MultiDiGraph:
       1. Download from OSM via ``ox.graph_from_point``.
       2. Keep only the largest strongly-connected component.
       3. Add edge speeds and travel times (OSMnx helpers).
-      4. Add *capacity* (lane- and length-based).
+      4. Add *lanes_n*, *capacity*, *flow_capacity*.
       5. Add *free_flow_time* = travel_time.
 
     Parameters
@@ -118,8 +137,10 @@ def build_graph(cfg: "StudyAreaConfig") -> nx.MultiDiGraph:
     G = ox.routing.add_edge_speeds(G)
     G = ox.routing.add_edge_travel_times(G)
 
-    # Capacity & free-flow snapshot
+    # Lane count, storage capacity, flow capacity, free-flow snapshot
+    _add_lanes_n(G, cfg)
     _add_capacity(G, cfg)
+    _add_flow_capacity(G, cfg)
     _add_free_flow_time(G)
 
     return G
@@ -140,14 +161,14 @@ def load_graph(path: str | Path) -> nx.MultiDiGraph:
     """Load a cached GraphML and coerce numeric edge attributes.
 
     GraphML round-trips may store numbers as strings; this function
-    ensures *length*, *speed_kph*, *travel_time*, *capacity*, and
-    *free_flow_time* come back as proper numeric types.
+    ensures all custom numeric attributes come back as proper types.
     """
     path = Path(path)
     G = ox.io.load_graphml(filepath=path)
 
-    _FLOAT_ATTRS = ("length", "speed_kph", "travel_time", "free_flow_time")
-    _INT_ATTRS = ("capacity",)
+    _FLOAT_ATTRS = ("length", "speed_kph", "travel_time", "free_flow_time",
+                     "flow_capacity")
+    _INT_ATTRS = ("capacity", "lanes_n")
 
     for u, v, k, data in G.edges(keys=True, data=True):
         for attr in _FLOAT_ATTRS:
@@ -183,4 +204,3 @@ def get_or_build_graph(cfg: "StudyAreaConfig") -> nx.MultiDiGraph:
     saved = save_graph(G, cache)
     print(f"[loader] Graph saved to {saved}")
     return G
-

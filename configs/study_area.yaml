@@ -6,5 +6,5 @@ network_type: drive
 default_lanes: 1
 capacity_per_lane_veh_per_km: 40
 min_edge_capacity: 2
+flow_rate_veh_per_min_per_lane: 12
 cache_path: data/graph.graphml
-

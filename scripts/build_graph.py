@@ -4,6 +4,7 @@
 Usage
 -----
     python scripts/build_graph.py --config configs/study_area.yaml
+    python scripts/build_graph.py --config configs/study_area.yaml --rebuild
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import osmnx as ox  # noqa: E402
 
 from src.config import load_config  # noqa: E402
-from src.graph.loader import get_or_build_graph  # noqa: E402
+from src.graph.loader import build_graph, get_or_build_graph, save_graph  # noqa: E402
 
 
 def main() -> None:
@@ -32,6 +33,11 @@ def main() -> None:
         default="configs/study_area.yaml",
         help="Path to the study-area YAML config.",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Ignore cache and rebuild the graph from OSM.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -39,7 +45,13 @@ def main() -> None:
     print(f"Center     : ({cfg.center_lat}, {cfg.center_lon})")
     print(f"Radius     : {cfg.dist_m} m\n")
 
-    G = get_or_build_graph(cfg)
+    if args.rebuild:
+        print("[build] Rebuilding graph (ignoring cache) …")
+        G = build_graph(cfg)
+        saved = save_graph(G, cfg.cache_path)
+        print(f"[build] Graph saved to {saved}")
+    else:
+        G = get_or_build_graph(cfg)
 
     # ---- Statistics ----
     n_nodes = G.number_of_nodes()
@@ -48,6 +60,7 @@ def main() -> None:
     lengths = np.array([d["length"] for _, _, d in G.edges(data=True)])
     capacities = np.array([d["capacity"] for _, _, d in G.edges(data=True)])
     travel_times = np.array([d["travel_time"] for _, _, d in G.edges(data=True)])
+    flow_caps = np.array([d["flow_capacity"] for _, _, d in G.edges(data=True)])
 
     total_road_km = lengths.sum() / 1000.0
 
@@ -61,6 +74,10 @@ def main() -> None:
     print(f"Capacity  median  : {np.median(capacities):.1f}")
     print(f"Travel-time min   : {travel_times.min():.2f} s")
     print(f"Travel-time max   : {travel_times.max():.2f} s")
+    print(f"Flow-cap   mean   : {flow_caps.mean():.1f} veh/min")
+    print(f"Flow-cap   median : {np.median(flow_caps):.1f} veh/min")
+    print(f"Flow-cap   min    : {flow_caps.min():.1f} veh/min")
+    print(f"Flow-cap   max    : {flow_caps.max():.1f} veh/min")
     print("=" * 50)
 
     # ---- Plot ----
@@ -75,4 +92,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
