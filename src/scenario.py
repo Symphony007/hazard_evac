@@ -7,8 +7,9 @@ agents travel outward toward the network perimeter.
 
 from __future__ import annotations
 
+import math
 import warnings
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import networkx as nx
 import numpy as np
@@ -21,6 +22,141 @@ if TYPE_CHECKING:
     from src.hazard.base import HazardModel
 
 
+class ExitList(list):
+    """List of exit nodes carrying fallback diagnostics.
+
+    Attributes
+    ----------
+    used_fallback_exits : bool
+        True if any exit was selected from flooded ring nodes as a fallback.
+    n_fallback_exits : int
+        Number of fallback exits selected.
+    """
+
+    used_fallback_exits: bool = False
+    n_fallback_exits: int = 0
+
+    def __init__(
+        self,
+        items: Sequence[int],
+        used_fallback: bool = False,
+        n_fallback: int = 0,
+    ) -> None:
+        super().__init__(items)
+        self.used_fallback_exits = bool(used_fallback)
+        self.n_fallback_exits = int(n_fallback)
+
+
+class AgentList(list):
+    """List of generated evacuee agents carrying scenario diagnostics.
+
+    Attributes
+    ----------
+    departure_window_capped : bool
+        True if the departure window was capped because all origins flood early.
+    effective_window_s : float
+        Actual maximum departure time sampled.
+    """
+
+    departure_window_capped: bool = False
+    effective_window_s: float = 0.0
+
+    def __init__(
+        self,
+        items: Sequence[Evacuee],
+        capped: bool = False,
+        window_s: float = 0.0,
+    ) -> None:
+        super().__init__(items)
+        self.departure_window_capped = bool(capped)
+        self.effective_window_s = float(window_s)
+
+
+def exit_spread_report(
+    G: "nx.MultiDiGraph",
+    exits: Sequence[int],
+    cfg: Any = None,
+    center_lat: float = 22.4985,
+    center_lon: float = 88.3450,
+) -> dict[str, float | int]:
+    """Compute geometric and angular spread diagnostics for boundary exits.
+
+    Parameters
+    ----------
+    G : nx.MultiDiGraph
+        Road network graph containing node coordinates 'y' (lat) and 'x' (lon).
+    exits : Sequence[int]
+        List of selected exit node IDs.
+    cfg : Any, optional
+        Configuration object (e.g. StudyAreaConfig) containing center_lat and center_lon.
+    center_lat : float, optional
+        Fallback latitude of study-area center.
+    center_lon : float, optional
+        Fallback longitude of study-area center.
+
+    Returns
+    -------
+    dict
+        Diagnostics containing:
+        - pairwise_mean_dist_m: Mean great-circle distance between exit pairs in metres.
+        - pairwise_min_dist_m: Minimum great-circle distance between any exit pair in metres.
+        - angular_coverage_deg: Angular coverage (360 - largest empty gap) in degrees.
+        - largest_gap_deg: Largest empty angular gap between consecutive exits in degrees.
+        - n_distinct_sectors: Number of distinct 45-degree sectors (out of 8) containing an exit.
+    """
+    if cfg is not None:
+        center_lat = getattr(cfg, "center_lat", center_lat)
+        center_lon = getattr(cfg, "center_lon", center_lon)
+
+    if len(exits) < 2:
+        return {
+            "pairwise_mean_dist_m": 0.0,
+            "pairwise_min_dist_m": 0.0,
+            "angular_coverage_deg": 0.0,
+            "largest_gap_deg": 360.0,
+            "n_distinct_sectors": len(exits),
+        }
+
+    # 1. Pairwise distances
+    coords = [(G.nodes[e]["y"], G.nodes[e]["x"]) for e in exits]
+    distances = []
+    for i in range(len(coords)):
+        for j in range(i + 1, len(coords)):
+            d = ox.distance.great_circle(
+                coords[i][0], coords[i][1], coords[j][0], coords[j][1]
+            )
+            distances.append(d)
+
+    mean_dist = float(np.mean(distances)) if distances else 0.0
+    min_dist = float(np.min(distances)) if distances else 0.0
+
+    # 2. Angles relative to center
+    angles = []
+    for lat, lon in coords:
+        dy = lat - center_lat
+        dx = lon - center_lon
+        deg = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
+        angles.append(deg)
+
+    angles.sort()
+    gaps = [angles[i + 1] - angles[i] for i in range(len(angles) - 1)]
+    gaps.append((angles[0] + 360.0) - angles[-1])
+    largest_gap = float(max(gaps))
+    coverage = float(360.0 - largest_gap)
+
+    # 3. 8 equal angular sectors (45 degrees each: 0..7)
+    sectors = {int(a // 45) % 8 for a in angles}
+    n_sectors = len(sectors)
+
+    return {
+        "pairwise_mean_dist_m": mean_dist,
+        "pairwise_min_dist_m": min_dist,
+        "angular_coverage_deg": coverage,
+        "largest_gap_deg": largest_gap,
+        "n_distinct_sectors": n_sectors,
+    }
+
+
 def build_exits(
     G: "nx.MultiDiGraph",
     hazard: "HazardModel",
@@ -28,7 +164,8 @@ def build_exits(
     center_lat: float = 22.4985,
     center_lon: float = 88.3450,
     horizon_min: float = 60.0,
-) -> list[int]:
+    return_details: bool = False,
+) -> list[int] | tuple[list[int], bool, int]:
     """Select n_exits on the perimeter ring using farthest-point sampling.
 
     Notes
@@ -64,11 +201,15 @@ def build_exits(
         Longitude of the study area center.
     horizon_min : float
         Simulation time horizon in minutes.
+    return_details : bool
+        If True, returns tuple (exits, used_fallback_exits, n_fallback_exits).
+        Regardless, the returned list also carries attributes .used_fallback_exits
+        and .n_fallback_exits.
 
     Returns
     -------
-    list[int]
-        List of selected exit node IDs (length equal to min(n_exits, available)).
+    list[int] or tuple[list[int], bool, int]
+        List of selected exit node IDs (ExitList instance).
     """
     n_exits = scenario_cfg.n_exits
     min_dist_m = scenario_cfg.exit_min_dist_from_center_m
@@ -90,6 +231,8 @@ def build_exits(
 
     # 2. Preferred: never flooded within horizon
     preferred = [n for n in ring_nodes if hazard.node_arrival_time(n) > horizon_s]
+    used_fallback = False
+    n_fallback = 0
 
     if len(preferred) >= n_exits:
         candidate_pool = preferred
@@ -99,6 +242,8 @@ def build_exits(
         remaining = [n for n in ring_nodes if hazard.node_arrival_time(n) <= horizon_s]
         remaining.sort(key=lambda n: hazard.node_arrival_time(n), reverse=True)
         fallback = remaining[:n_needed]
+        used_fallback = True
+        n_fallback = len(fallback)
         print(
             f"[scenario] WARNING: Only {len(preferred)}/{n_exits} preferred unflooded exits "
             f"found on boundary ring; selected {len(fallback)} fallback exit(s) with latest arrival times."
@@ -106,7 +251,8 @@ def build_exits(
         candidate_pool = preferred + fallback
 
     if len(candidate_pool) <= n_exits:
-        return candidate_pool
+        res = ExitList(candidate_pool, used_fallback=used_fallback, n_fallback=n_fallback)
+        return (res, used_fallback, n_fallback) if return_details else res
 
     # 4. Farthest-point sampling on candidate_pool
     # Deterministic seed: candidate with maximum distance to nearest flood source
@@ -152,7 +298,8 @@ def build_exits(
         selected.append(best_candidate)
         remaining_set.remove(best_candidate)
 
-    return selected
+    res = ExitList(selected, used_fallback=used_fallback, n_fallback=n_fallback)
+    return (res, used_fallback, n_fallback) if return_details else res
 
 
 def generate_agents(
@@ -196,8 +343,10 @@ def generate_agents(
         if np.isfinite(hazard.node_arrival_time(n))
     ]
     max_arrival = max(finite_arrivals) if finite_arrivals else float("inf")
+    capped = False
     if max_arrival <= (depart_window_s + 30.0):
         effective_window_s = max(0.0, max_arrival - 30.1)
+        capped = True
         print(
             f"[scenario] WARNING: All origins flooded by t={max_arrival:.1f}s; "
             f"capping departure window to {effective_window_s:.1f}s (was {depart_window_s:.1f}s)."
@@ -227,7 +376,7 @@ def generate_agents(
             )
         )
 
-    return agents
+    return AgentList(agents, capped=capped, window_s=effective_window_s)
 
 
 def shortest_baseline_length(

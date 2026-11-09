@@ -62,6 +62,28 @@ class ScenarioConfig:
     example_flood_speed_m_per_min: float = 120.0
 
 
+@dataclass
+class ExperimentConfig:
+    """Configuration for multi-seed experiments and statistical evaluation."""
+
+    n_seeds: int = 30
+    n_seeds_stress: int = 10
+    base_hazard_seed: int = 1000
+    base_scenario_seed: int = 2000
+    main_speeds_m_per_min: list[float] = field(
+        default_factory=lambda: [30.0, 40.0, 50.0, 60.0, 75.0, 90.0]
+    )
+    stress_speeds_m_per_min: list[float] = field(
+        default_factory=lambda: [120.0, 240.0]
+    )
+    example_speed_m_per_min: float = 60.0
+    example_seed_index: int = 0
+    workers: int = 4
+    ci_level: float = 0.95
+    output_dir: str = "outputs/task4"
+    vary_terrain: bool = False
+
+
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
     """Load a YAML config file into a dataclass.
 

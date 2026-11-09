@@ -1,0 +1,13 @@
+n_seeds: 30
+n_seeds_stress: 10
+base_hazard_seed: 1000
+base_scenario_seed: 2000
+main_speeds_m_per_min: [30, 40, 50, 60, 75, 90]
+stress_speeds_m_per_min: [120, 240]
+example_speed_m_per_min: 60
+example_seed_index: 0
+workers: 4
+ci_level: 0.95
+output_dir: outputs/task4
+vary_terrain: false
+
