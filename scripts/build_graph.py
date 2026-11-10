@@ -80,6 +80,8 @@ def main() -> None:
     print(f"Lanes from OSM    : {osm_share:.1f}% ({sum(1 for s in sources_list if s == 'osm')}/{n_edges})")
     print(f"Capacity  mean    : {capacities.mean():.1f}")
     print(f"Capacity  median  : {np.median(capacities):.1f}")
+    print(f"Capacity  min     : {capacities.min():.1f}")
+    print(f"Capacity  max     : {capacities.max():.1f}")
     print(f"Travel-time min   : {travel_times.min():.2f} s")
     print(f"Travel-time max   : {travel_times.max():.2f} s")
     print(f"Flow-cap   mean   : {flow_caps.mean():.1f} veh/min")

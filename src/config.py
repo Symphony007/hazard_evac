@@ -32,7 +32,7 @@ class StudyAreaConfig:
             "service": 1,
         }
     )
-    capacity_per_lane_veh_per_km: int = 40
+    capacity_per_lane_veh_per_km: int = 120
     min_edge_capacity: int = 2
     flow_rate_veh_per_min_per_lane: int = 12
     cache_path: str = "data/graph.graphml"

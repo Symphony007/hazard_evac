@@ -14,7 +14,9 @@ lanes_by_highway:
   residential: 1
   living_street: 1
   service: 1
-capacity_per_lane_veh_per_km: 40
+# Jam density storage capacity (~8 m per vehicle). This only changes the STORAGE
+# "capacity" attribute used for spillback diagnostics, never routing.
+capacity_per_lane_veh_per_km: 120
 min_edge_capacity: 2
 flow_rate_veh_per_min_per_lane: 12
 cache_path: data/graph.graphml
