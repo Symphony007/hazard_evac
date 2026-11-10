@@ -47,7 +47,8 @@ data layer (OSMnx graph)
 4-person team, 6-week first phase, goal is a strong mid-semester demo.
 
 ## Status and known assumptions (update as we go)
-- Done: Task 1 (graph loader), Task 2 (flood hazard simulator).
+- Done: Task 1 (graph loader), Task 2 (flood hazard simulator), Task 3 (single-agent routers & failure demo), Task 4 (metrics & statistical experiment runner), Task 4b (sector-based exit placement).
+- Exit placement: Sector-based boundary exits (`exit_mode: sector`) partition the perimeter ring into `n_exits` angular sectors and select the latest-flooding node safe through `(depart_window_min + exit_safe_margin_min)`. Dropping early-flooded sectors prevents artificial corner-clustering bottlenecks.
 - Terrain is SYNTHETIC (generated, not a real DEM). A real DEM and a
   flood calibration against a documented Kolkata event are planned as
   "Task 2b"; the ElevationProvider interface in src/hazard/terrain.py

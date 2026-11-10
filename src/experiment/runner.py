@@ -131,7 +131,7 @@ def run_single(
     hazard = FloodHazard(G, h_cfg)
 
     # 2. Select exits & diagnostics
-    exits = build_exits(
+    exits, exit_info = build_exits(
         G=G,
         hazard=hazard,
         scenario_cfg=scenario_cfg,
@@ -139,8 +139,11 @@ def run_single(
         center_lon=graph_cfg.center_lon,
         horizon_min=h_cfg.horizon_min,
     )
-    used_fallback_exits = getattr(exits, "used_fallback_exits", False)
-    n_fallback_exits = getattr(exits, "n_fallback_exits", 0)
+    used_fallback_exits = exit_info.get("used_fallback_exits", False)
+    n_fallback_exits = exit_info.get("n_fallback_exits", 0)
+    n_exits_effective = exit_info.get("n_exits_effective", len(exits))
+    sectors_with_exit_count = len(exit_info.get("sectors_with_exit", []))
+    sectors_dropped_count = len(exit_info.get("sectors_dropped", []))
 
     spread_report = exit_spread_report(
         G=G,
@@ -203,6 +206,9 @@ def run_single(
         "terrain_seed": terrain_seed,
         "used_fallback_exits": bool(used_fallback_exits),
         "n_fallback_exits": int(n_fallback_exits),
+        "n_exits_effective": int(n_exits_effective),
+        "sectors_with_exit_count": int(sectors_with_exit_count),
+        "sectors_dropped_count": int(sectors_dropped_count),
         "departure_window_capped": bool(departure_window_capped),
         "n_agents": len(agents),
         "exit_spread": spread_report,

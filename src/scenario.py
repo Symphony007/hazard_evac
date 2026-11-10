@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class ExitList(list):
-    """List of exit nodes carrying fallback diagnostics.
+    """List of exit nodes carrying sector and fallback diagnostics.
 
     Attributes
     ----------
@@ -31,20 +31,54 @@ class ExitList(list):
         True if any exit was selected from flooded ring nodes as a fallback.
     n_fallback_exits : int
         Number of fallback exits selected.
+    n_exits_effective : int
+        Number of effective exits returned.
+    sectors_with_exit : list[int]
+        List of sector indices that have an exit.
+    sectors_dropped : list[int]
+        List of sector indices dropped due to early flooding.
+    safe_time_s : float
+        Threshold time (s) required for an exit to be considered safe.
+    info : dict[str, Any]
+        Dictionary summary of exit diagnostics.
     """
 
     used_fallback_exits: bool = False
     n_fallback_exits: int = 0
+    n_exits_effective: int = 0
+    sectors_with_exit: list[int]
+    sectors_dropped: list[int]
+    safe_time_s: float = 0.0
+    info: dict[str, Any]
 
     def __init__(
         self,
         items: Sequence[int],
         used_fallback: bool = False,
         n_fallback: int = 0,
+        info: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(items)
         self.used_fallback_exits = bool(used_fallback)
         self.n_fallback_exits = int(n_fallback)
+        self.n_exits_effective = len(items)
+        if info is not None:
+            self.info = dict(info)
+            self.sectors_with_exit = list(info.get("sectors_with_exit", []))
+            self.sectors_dropped = list(info.get("sectors_dropped", []))
+            self.safe_time_s = float(info.get("safe_time_s", 0.0))
+        else:
+            self.info = {
+                "n_exits_effective": len(items),
+                "sectors_with_exit": [],
+                "sectors_dropped": [],
+                "used_fallback_exits": self.used_fallback_exits,
+                "n_fallback_exits": self.n_fallback_exits,
+                "safe_time_s": 0.0,
+            }
+            self.sectors_with_exit = []
+            self.sectors_dropped = []
+            self.safe_time_s = 0.0
 
 
 class AgentList(list):
@@ -165,27 +199,24 @@ def build_exits(
     center_lon: float = 88.3450,
     horizon_min: float = 60.0,
     return_details: bool = False,
-) -> list[int] | tuple[list[int], bool, int]:
-    """Select n_exits on the perimeter ring using farthest-point sampling.
+) -> tuple[ExitList, dict[str, Any]]:
+    """Select perimeter ring exits using sector-based placement or legacy latest-arrival.
 
     Notes
     -----
-    Exits model 'leaving the study area'. The square download box creates
-    artificial boundary stubs at the study area perimeter; exits are
-    deliberately placed on the outer boundary ring to represent evacuation
-    routes leading outside the hazard impact zone.
+    Exits model agents leaving the study area across the network perimeter.
+    Because exit safety depends on the hazard spread across the road network,
+    exits are selected per (flood speed, seed).
 
-    Procedure
-    ---------
-    1. Identify candidate boundary ring nodes with distance from study area center
-       >= scenario_cfg.exit_min_dist_from_center_m.
-    2. Preferred candidates: ring nodes with arrival_time > horizon_min * 60 (never
-       flooded within the simulation horizon).
-    3. Fallback: if fewer than n_exits preferred nodes exist (e.g. at extreme flood
-       speeds), supplement with ring nodes having the latest arrival times, and
-       emit a warning.
-    4. Apply farthest-point sampling to select n_exits well-separated boundary nodes,
-       seeded by the candidate farthest from the nearest flood source.
+    Exit Modes
+    ----------
+    - 'sector': Divides the boundary perimeter into n_exits equal angular sectors.
+      In each sector, selects the node with the latest arrival time among those
+      safe past safe_time_s = (depart_window_min + exit_safe_margin_min) * 60.
+      Sectors with no qualifying safe nodes are dropped. If fewer than
+      min_exits_required sectors qualify, falls back to latest arrival node per sector.
+    - 'legacy_latest': Prioritizes boundary nodes never flooded within horizon_min,
+      falling back to the latest-flooding ring nodes via farthest-point sampling.
 
     Parameters
     ----------
@@ -194,7 +225,7 @@ def build_exits(
     hazard : HazardModel
         Hazard simulator providing node arrival times and sources.
     scenario_cfg : ScenarioConfig
-        Scenario configuration containing n_exits and exit_min_dist_from_center_m.
+        Scenario configuration containing n_exits, exit_mode, exit_min_dist_from_center_m, etc.
     center_lat : float
         Latitude of the study area center.
     center_lon : float
@@ -202,20 +233,24 @@ def build_exits(
     horizon_min : float
         Simulation time horizon in minutes.
     return_details : bool
-        If True, returns tuple (exits, used_fallback_exits, n_fallback_exits).
-        Regardless, the returned list also carries attributes .used_fallback_exits
-        and .n_fallback_exits.
+        Maintained for backwards-compatibility; function returns tuple of (exits, exit_info).
 
     Returns
     -------
-    list[int] or tuple[list[int], bool, int]
-        List of selected exit node IDs (ExitList instance).
+    tuple[ExitList, dict[str, Any]]
+        Selected exit node IDs (ExitList instance) and info dict containing:
+        - n_exits_effective: int
+        - sectors_with_exit: list[int]
+        - sectors_dropped: list[int]
+        - used_fallback_exits: bool
+        - n_fallback_exits: int
+        - safe_time_s: float
     """
     n_exits = scenario_cfg.n_exits
     min_dist_m = scenario_cfg.exit_min_dist_from_center_m
-    horizon_s = horizon_min * 60.0
+    exit_mode = getattr(scenario_cfg, "exit_mode", "sector")
 
-    # 1. Candidate ring nodes
+    # 1. Candidate ring nodes >= exit_min_dist_from_center_m from center
     ring_nodes: list[int] = []
     for n, data in G.nodes(data=True):
         lat = data["y"]
@@ -229,77 +264,161 @@ def build_exits(
             f"No boundary nodes found >= {min_dist_m}m from center ({center_lat}, {center_lon})"
         )
 
-    # 2. Preferred: never flooded within horizon
-    preferred = [n for n in ring_nodes if hazard.node_arrival_time(n) > horizon_s]
+    # Pre-extract sources for tie-breaking
+    sources = getattr(hazard, "sources", [])
+
+    def _dist_to_source(node: int) -> float:
+        if not sources:
+            return 0.0
+        lat = G.nodes[node]["y"]
+        lon = G.nodes[node]["x"]
+        return min(
+            ox.distance.great_circle(lat, lon, G.nodes[s]["y"], G.nodes[s]["x"])
+            for s in sources
+        )
+
+    # -------------------------------------------------------------------------
+    # Mode A: Legacy Latest-Arrival Farthest-Point Sampling
+    # -------------------------------------------------------------------------
+    if exit_mode == "legacy_latest":
+        horizon_s = horizon_min * 60.0
+        preferred = [n for n in ring_nodes if hazard.node_arrival_time(n) > horizon_s]
+        used_fallback = False
+        n_fallback = 0
+
+        if len(preferred) >= n_exits:
+            candidate_pool = preferred
+        else:
+            n_needed = n_exits - len(preferred)
+            remaining = [n for n in ring_nodes if hazard.node_arrival_time(n) <= horizon_s]
+            remaining.sort(key=lambda n: hazard.node_arrival_time(n), reverse=True)
+            fallback = remaining[:n_needed]
+            used_fallback = True
+            n_fallback = len(fallback)
+            print(
+                f"[scenario] WARNING: Only {len(preferred)}/{n_exits} preferred unflooded exits "
+                f"found on boundary ring; selected {len(fallback)} fallback exit(s) with latest arrival times."
+            )
+            candidate_pool = preferred + fallback
+
+        if len(candidate_pool) <= n_exits:
+            selected = list(candidate_pool)
+        else:
+            if sources:
+                candidate_pool.sort(key=lambda n: (_dist_to_source(n), n), reverse=True)
+                first_exit = candidate_pool[0]
+            else:
+                candidate_pool.sort()
+                first_exit = candidate_pool[0]
+
+            selected = [first_exit]
+            remaining_set = set(candidate_pool)
+            remaining_set.remove(first_exit)
+            coords = {n: (G.nodes[n]["y"], G.nodes[n]["x"]) for n in candidate_pool}
+
+            while len(selected) < n_exits and remaining_set:
+                best_candidate: int | None = None
+                best_min_dist = -1.0
+                for cand in sorted(remaining_set):
+                    lat_c, lon_c = coords[cand]
+                    min_dist_to_selected = min(
+                        ox.distance.great_circle(lat_c, lon_c, coords[sel][0], coords[sel][1])
+                        for sel in selected
+                    )
+                    if min_dist_to_selected > best_min_dist:
+                        best_min_dist = min_dist_to_selected
+                        best_candidate = cand
+                if best_candidate is None:
+                    break
+                selected.append(best_candidate)
+                remaining_set.remove(best_candidate)
+
+        info = {
+            "n_exits_effective": len(selected),
+            "sectors_with_exit": [],
+            "sectors_dropped": [],
+            "used_fallback_exits": bool(used_fallback),
+            "n_fallback_exits": int(n_fallback),
+            "safe_time_s": float(horizon_s),
+        }
+        res = ExitList(selected, used_fallback=used_fallback, n_fallback=n_fallback, info=info)
+        return res, info
+
+    # -------------------------------------------------------------------------
+    # Mode B: Sector-Based Exits
+    # -------------------------------------------------------------------------
+    # NOTE: Exits are chosen per (flood speed, seed) because they depend on the hazard.
+    lat0_rad = math.radians(center_lat)
+    cos_lat0 = math.cos(lat0_rad)
+
+    # Group ring nodes into n_exits equal angular sectors
+    sector_width = 360.0 / n_exits
+    sector_nodes: dict[int, list[int]] = {s: [] for s in range(n_exits)}
+
+    for n in ring_nodes:
+        lat = G.nodes[n]["y"]
+        lon = G.nodes[n]["x"]
+        dx = (lon - center_lon) * cos_lat0
+        dy = lat - center_lat
+        angle = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
+        sec_idx = int(angle // sector_width)
+        if sec_idx >= n_exits:
+            sec_idx = n_exits - 1
+        sector_nodes[sec_idx].append(n)
+
+    safe_margin_min = getattr(scenario_cfg, "exit_safe_margin_min", 15.0)
+    safe_time_s = (scenario_cfg.depart_window_min + safe_margin_min) * 60.0
+    min_exits_req = getattr(scenario_cfg, "min_exits_required", 3)
+
+    # Tie-break key: latest arrival time, farthest from nearest source, lowest node id
+    def _node_priority_key(n: int) -> tuple[float, float, int]:
+        return (hazard.node_arrival_time(n), _dist_to_source(n), -int(n))
+
+    selected_exits: list[int] = []
+    sectors_with_exit: list[int] = []
+    sectors_dropped: list[int] = []
+
+    for s in range(n_exits):
+        qualifying = [n for n in sector_nodes[s] if hazard.node_arrival_time(n) >= safe_time_s]
+        if qualifying:
+            best_node = max(qualifying, key=_node_priority_key)
+            selected_exits.append(best_node)
+            sectors_with_exit.append(s)
+        else:
+            sectors_dropped.append(s)
+
     used_fallback = False
     n_fallback = 0
 
-    if len(preferred) >= n_exits:
-        candidate_pool = preferred
-    else:
-        n_needed = n_exits - len(preferred)
-        # Sort remaining ring nodes by arrival time descending (latest flood first)
-        remaining = [n for n in ring_nodes if hazard.node_arrival_time(n) <= horizon_s]
-        remaining.sort(key=lambda n: hazard.node_arrival_time(n), reverse=True)
-        fallback = remaining[:n_needed]
+    # Fallback if fewer than min_exits_required sectors qualify
+    if len(sectors_with_exit) < min_exits_req:
         used_fallback = True
-        n_fallback = len(fallback)
         print(
-            f"[scenario] WARNING: Only {len(preferred)}/{n_exits} preferred unflooded exits "
-            f"found on boundary ring; selected {len(fallback)} fallback exit(s) with latest arrival times."
+            f"[scenario] WARNING: Only {len(sectors_with_exit)}/{min_exits_req} sectors had safe exits "
+            f"(threshold {safe_time_s/60:.1f} min); triggered fallback across all sectors."
         )
-        candidate_pool = preferred + fallback
+        selected_exits = []
+        sectors_with_exit = []
+        sectors_dropped = []
+        for s in range(n_exits):
+            if sector_nodes[s]:
+                best_node = max(sector_nodes[s], key=_node_priority_key)
+                selected_exits.append(best_node)
+                sectors_with_exit.append(s)
+            else:
+                sectors_dropped.append(s)
+        n_fallback = sum(1 for n in selected_exits if hazard.node_arrival_time(n) < safe_time_s)
 
-    if len(candidate_pool) <= n_exits:
-        res = ExitList(candidate_pool, used_fallback=used_fallback, n_fallback=n_fallback)
-        return (res, used_fallback, n_fallback) if return_details else res
-
-    # 4. Farthest-point sampling on candidate_pool
-    # Deterministic seed: candidate with maximum distance to nearest flood source
-    sources = getattr(hazard, "sources", [])
-    if sources:
-        def dist_to_nearest_source(node: int) -> float:
-            lat = G.nodes[node]["y"]
-            lon = G.nodes[node]["x"]
-            return min(
-                ox.distance.great_circle(lat, lon, G.nodes[s]["y"], G.nodes[s]["x"])
-                for s in sources
-            )
-        candidate_pool.sort(key=lambda n: (dist_to_nearest_source(n), n), reverse=True)
-        first_exit = candidate_pool[0]
-    else:
-        candidate_pool.sort()
-        first_exit = candidate_pool[0]
-
-    selected: list[int] = [first_exit]
-    remaining_set = set(candidate_pool)
-    remaining_set.remove(first_exit)
-
-    # Pre-extract coordinates for fast distance calculation
-    coords = {n: (G.nodes[n]["y"], G.nodes[n]["x"]) for n in candidate_pool}
-
-    while len(selected) < n_exits and remaining_set:
-        best_candidate: int | None = None
-        best_min_dist = -1.0
-
-        for cand in sorted(remaining_set):
-            lat_c, lon_c = coords[cand]
-            min_dist_to_selected = min(
-                ox.distance.great_circle(lat_c, lon_c, coords[sel][0], coords[sel][1])
-                for sel in selected
-            )
-            if min_dist_to_selected > best_min_dist:
-                best_min_dist = min_dist_to_selected
-                best_candidate = cand
-
-        if best_candidate is None:
-            break
-
-        selected.append(best_candidate)
-        remaining_set.remove(best_candidate)
-
-    res = ExitList(selected, used_fallback=used_fallback, n_fallback=n_fallback)
-    return (res, used_fallback, n_fallback) if return_details else res
+    info = {
+        "n_exits_effective": len(selected_exits),
+        "sectors_with_exit": sorted(sectors_with_exit),
+        "sectors_dropped": sorted(sectors_dropped),
+        "used_fallback_exits": bool(used_fallback),
+        "n_fallback_exits": int(n_fallback),
+        "safe_time_s": float(safe_time_s),
+    }
+    res = ExitList(selected_exits, used_fallback=used_fallback, n_fallback=n_fallback, info=info)
+    return res, info
 
 
 def generate_agents(

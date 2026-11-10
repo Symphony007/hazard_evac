@@ -160,9 +160,14 @@ def plot_sweep_ci(
         lows_clean = np.where(np.isfinite(lows), lows, means)
         highs_clean = np.where(np.isfinite(highs), highs, means)
 
+        # Clip CI display bands and means to [0, 100] for display only
+        lows_clean = np.clip(lows_clean, 0.0, 100.0)
+        highs_clean = np.clip(highs_clean, 0.0, 100.0)
+        means_clean = np.clip(means, 0.0, 100.0)
+
         ax.plot(
             spds,
-            means,
+            means_clean,
             color=style["color"],
             marker=style["marker"],
             linestyle=style["linestyle"],
@@ -183,7 +188,7 @@ def plot_sweep_ci(
     ax.set_xlabel("Flood Spread Speed (m/min)", fontsize=11)
     ax.set_ylabel("% Evacuees Safe (pct_safe)", fontsize=11)
     ax.set_title("Evacuation Success vs Hazard Spread Speed (Mean ± 95% CI)", fontsize=12)
-    ax.set_ylim(-2, 105)
+    ax.set_ylim(-2, 102)
     ax.set_xticks(all_speeds)
     ax.grid(True, alpha=0.3, linestyle=":")
     ax.legend(frameon=True, loc="lower left", fontsize=9.5)
@@ -229,9 +234,14 @@ def plot_gain_over_static(
         lows = subset["ci_low"].values
         highs = subset["ci_high"].values
 
-        # Asymmetric error bars
-        yerr_lower = np.where(np.isfinite(lows), means - lows, 0.0)
-        yerr_upper = np.where(np.isfinite(highs), highs - means, 0.0)
+        # Asymmetric error bars clipped to valid display bounds [-100, 100]
+        lows_disp = np.clip(lows, -100.0, 100.0)
+        highs_disp = np.clip(highs, -100.0, 100.0)
+        yerr_lower = np.where(np.isfinite(lows_disp), means - lows_disp, 0.0)
+        yerr_upper = np.where(np.isfinite(highs_disp), highs_disp - means, 0.0)
+        # Ensure non-negative error bar extents for display
+        yerr_lower = np.maximum(yerr_lower, 0.0)
+        yerr_upper = np.maximum(yerr_upper, 0.0)
         yerr = [yerr_lower, yerr_upper]
 
         ax.errorbar(
@@ -452,6 +462,9 @@ def aggregate_and_report(
                 "scenario_seed": int(r["scenario_seed"]),
                 "used_fallback_exits": bool(r["used_fallback_exits"]),
                 "n_fallback_exits": int(r["n_fallback_exits"]),
+                "n_exits_effective": int(r.get("n_exits_effective", len(r.get("exit_spread", {})))),
+                "sectors_with_exit_count": int(r.get("sectors_with_exit_count", 0)),
+                "sectors_dropped_count": int(r.get("sectors_dropped_count", 0)),
                 "departure_window_capped": bool(r["departure_window_capped"]),
                 "n_agents": int(r["n_agents"]),
                 "pairwise_mean_dist_m": float(spread.get("pairwise_mean_dist_m", np.nan)),
@@ -611,7 +624,7 @@ def main() -> None:
     print("=" * 95)
     print(
         f"{'Speed':<8} {'Regime':<8} {'Router':<16} {'pct_safe (95% CI)':<24} "
-        f"{'Evac min (95% CI)':<22} {'Compute ms':<12} {'Runs'}"
+        f"{'Evac min (95% CI)':<22} {'ms/agent':<12} {'Runs'}"
     )
     print("-" * 95)
     for _, row in summary_df.iterrows():
@@ -685,6 +698,7 @@ def main() -> None:
         sub = diag_df[diag_df["speed"] == s]
         print(
             f"  Speed {s:3.0f} m/min: "
+            f"exits = {sub['n_exits_effective'].mean():.1f}, "
             f"sectors = {sub['n_distinct_sectors'].mean():.1f}/8, "
             f"coverage = {sub['angular_coverage_deg'].mean():.1f}°, "
             f"pairwise min dist = {sub['pairwise_min_dist_m'].mean():.0f}m"
@@ -729,7 +743,7 @@ def main() -> None:
             terrain_seed=int(hazard_cfg.terrain_seed),
         )
         hazard = FloodHazard(G, h_cfg)
-        exits = build_exits(
+        exits, _ = build_exits(
             G,
             hazard,
             scenario_cfg,

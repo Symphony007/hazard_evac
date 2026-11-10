@@ -52,6 +52,9 @@ class ScenarioConfig:
     scenario_seed: int = 11
     n_exits: int = 6
     exit_min_dist_from_center_m: float = 1200.0
+    exit_mode: str = "sector"
+    exit_safe_margin_min: float = 15.0
+    min_exits_required: int = 3
     n_evacuees: int = 300
     depart_window_min: float = 20.0
     vehicle_speed_scale: float = 0.5

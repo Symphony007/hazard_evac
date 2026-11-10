@@ -1,6 +1,9 @@
 scenario_seed: 11
 n_exits: 6
 exit_min_dist_from_center_m: 1200
+exit_mode: sector            # sector | legacy_latest
+exit_safe_margin_min: 15
+min_exits_required: 3
 n_evacuees: 300
 depart_window_min: 20
 vehicle_speed_scale: 0.5     # urban crawl, fraction of OSM speed (ASSUMPTION)

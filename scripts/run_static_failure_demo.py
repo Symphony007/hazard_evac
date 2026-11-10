@@ -305,7 +305,7 @@ def main() -> None:
         speed_hazards[speed] = hazard
 
         # Rebuild exits per flood speed (unflooded boundary nodes depend on flood speed)
-        exits = build_exits(
+        exits, _ = build_exits(
             G,
             hazard,
             scenario_cfg,

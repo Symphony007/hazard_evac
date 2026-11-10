@@ -259,7 +259,7 @@ def test_6_time_dependent_correctness_on_kolkata():
 
     G = get_or_build_graph(graph_cfg)
     hazard = FloodHazard(G, hazard_cfg)
-    exits = build_exits(
+    exits, _ = build_exits(
         G,
         hazard,
         scenario_cfg,
