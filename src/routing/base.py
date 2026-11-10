@@ -8,11 +8,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Protocol, Sequence
 
 if TYPE_CHECKING:
     import networkx as nx
     from src.hazard.base import HazardModel
+
+
+class TrafficView(Protocol):
+    """Protocol for querying link congestion delay estimates."""
+
+    def extra_delay_s(self, u: int, v: int, k: int, t: float) -> float:
+        """Return anticipated queue delay beyond free transit for edge (u, v, k) at time t."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -81,18 +89,16 @@ class Router(ABC):
     name : str
         Human-readable name of the routing method.
     replans : bool
-        Whether this router triggers dynamic replanning during simulation
-        upon detecting closed downstream edges.
-
-    Notes
-    -----
-    In Task 5 (multi-agent routing with edge capacities), this interface
-    will gain a `plan_batch(G, hazard, evacuees, t_now_s, states, exits, params)`
-    method with a default implementation that loops over agents.
+        Whether this router triggers dynamic replanning upon detecting
+        closed downstream edges.
+    replan_interval_s : float | None
+        Periodic replanning interval in seconds, or None if periodic replanning
+        is disabled.
     """
 
     name: str
     replans: bool = False
+    replan_interval_s: float | None = None
 
     @abstractmethod
     def plan(
@@ -104,6 +110,7 @@ class Router(ABC):
         current_node: int,
         exits: set[int] | Sequence[int],
         params: RoutingParams,
+        traffic: TrafficView | None = None,
     ) -> Route | None:
         """Compute a route from *current_node* at *t_now_s* to any exit.
 

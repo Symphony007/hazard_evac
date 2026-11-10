@@ -1,0 +1,11 @@
+flood_speed_m_per_min: 60
+demand_levels: [100, 300, 600, 1000, 1500]
+n_seeds: 10
+base_hazard_seed: 3000
+base_scenario_seed: 4000
+routers: [static, reactive, time_dependent, selfish]
+workers: 4
+output_dir: outputs/task5
+example_demand: 1000
+example_seed_index: 0
+

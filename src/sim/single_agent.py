@@ -63,6 +63,7 @@ class AgentResult:
     n_replans: int
     compute_ms: float
     trap_time_s: float | None = None
+    queue_delay_s: float = 0.0
 
 
 def simulate_agent(

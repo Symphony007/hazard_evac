@@ -4,6 +4,16 @@ center_lon: 88.3450
 dist_m: 1500
 network_type: drive
 default_lanes: 1
+lanes_by_highway:
+  motorway: 3
+  trunk: 3
+  primary: 2
+  secondary: 2
+  tertiary: 1
+  unclassified: 1
+  residential: 1
+  living_street: 1
+  service: 1
 capacity_per_lane_veh_per_km: 40
 min_edge_capacity: 2
 flow_rate_veh_per_min_per_lane: 12

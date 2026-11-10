@@ -61,15 +61,23 @@ def main() -> None:
     capacities = np.array([d["capacity"] for _, _, d in G.edges(data=True)])
     travel_times = np.array([d["travel_time"] for _, _, d in G.edges(data=True)])
     flow_caps = np.array([d["flow_capacity"] for _, _, d in G.edges(data=True)])
+    lanes_list = [d.get("lanes_n", 1) for _, _, d in G.edges(data=True)]
+    sources_list = [d.get("lanes_source", "default") for _, _, d in G.edges(data=True)]
+
+    from collections import Counter
+    lanes_dist = dict(sorted(Counter(lanes_list).items()))
+    osm_share = (sum(1 for s in sources_list if s == "osm") / n_edges * 100.0) if n_edges else 0.0
 
     total_road_km = lengths.sum() / 1000.0
 
-    print("=" * 50)
+    print("=" * 65)
     print("GRAPH STATISTICS")
-    print("=" * 50)
+    print("=" * 65)
     print(f"Nodes             : {n_nodes}")
     print(f"Edges             : {n_edges}")
     print(f"Total road length : {total_road_km:.2f} km")
+    print(f"Lanes distribution: {lanes_dist}")
+    print(f"Lanes from OSM    : {osm_share:.1f}% ({sum(1 for s in sources_list if s == 'osm')}/{n_edges})")
     print(f"Capacity  mean    : {capacities.mean():.1f}")
     print(f"Capacity  median  : {np.median(capacities):.1f}")
     print(f"Travel-time min   : {travel_times.min():.2f} s")
@@ -78,7 +86,26 @@ def main() -> None:
     print(f"Flow-cap   median : {np.median(flow_caps):.1f} veh/min")
     print(f"Flow-cap   min    : {flow_caps.min():.1f} veh/min")
     print(f"Flow-cap   max    : {flow_caps.max():.1f} veh/min")
-    print("=" * 50)
+    print("-" * 65)
+    print("Top 10 Longest Arterial Edges (primary, secondary, trunk):")
+    target_hwys = {"primary", "secondary", "trunk"}
+    arterial_edges = []
+    for u, v, k, d in G.edges(keys=True, data=True):
+        h = d.get("highway")
+        if isinstance(h, list):
+            types = set(h)
+        elif isinstance(h, str):
+            types = {h}
+        else:
+            types = set()
+        types_stripped = {t.removesuffix("_link") for t in types}
+        if types_stripped & target_hwys:
+            arterial_edges.append((d["length"], d["flow_capacity"], d["lanes_n"], h, u, v, k))
+
+    arterial_edges.sort(key=lambda x: x[0], reverse=True)
+    for length_m, fc, ln, h, u, v, k in arterial_edges[:10]:
+        print(f"  ({u}->{v}, k={k}): len={length_m:.1f}m, lanes={ln}, flow_cap={fc:.0f} veh/min, hwy={h}")
+    print("=" * 65)
 
     # ---- Plot ----
     out_dir = PROJECT_ROOT / "outputs"

@@ -20,7 +20,7 @@ earliest-arrival paths without requiring label correction or waiting.
 from __future__ import annotations
 
 import heapq
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Callable, Literal, Sequence
 
 from src.routing.base import Route, RoutingParams
 
@@ -37,6 +37,7 @@ def earliest_arrival_search(
     exits: set[int] | Sequence[int],
     params: RoutingParams,
     mode: Literal["frozen", "time_dependent"],
+    extra_delay: Callable[[int, int, int, float], float] | None = None,
 ) -> Route | None:
     """Find the earliest-arrival route from *source* to any exit.
 
@@ -120,7 +121,8 @@ def earliest_arrival_search(
                     continue
                 sf = max(hazard.edge_speed_factor(u, v, k, t_start), sf_floor)
                 tt = fft / speed_scale / sf
-                t_arr = t_u + tt
+                delay = extra_delay(u, v, k, t_start) if extra_delay is not None else 0.0
+                t_arr = t_u + tt + max(0.0, float(delay))
             else:
                 # Time-dependent: evaluated at arrival time at u (t_u)
                 if hazard.is_edge_closed(u, v, k, t_u):

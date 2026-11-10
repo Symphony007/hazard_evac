@@ -19,6 +19,19 @@ class StudyAreaConfig:
     dist_m: int = 1500
     network_type: str = "drive"
     default_lanes: int = 1
+    lanes_by_highway: dict[str, int] = field(
+        default_factory=lambda: {
+            "motorway": 3,
+            "trunk": 3,
+            "primary": 2,
+            "secondary": 2,
+            "tertiary": 1,
+            "unclassified": 1,
+            "residential": 1,
+            "living_street": 1,
+            "service": 1,
+        }
+    )
     capacity_per_lane_veh_per_km: int = 40
     min_edge_capacity: int = 2
     flow_rate_veh_per_min_per_lane: int = 12
@@ -87,6 +100,34 @@ class ExperimentConfig:
     vary_terrain: bool = False
 
 
+@dataclass
+class TrafficConfig:
+    """Configuration for point-queue traffic dynamics."""
+
+    replan_interval_s: float = 60.0
+
+
+@dataclass
+class CongestionConfig:
+    """Configuration for multi-agent demand sweep experiments."""
+
+    flood_speed_m_per_min: float = 60.0
+    demand_levels: list[int] = field(
+        default_factory=lambda: [100, 300, 600, 1000, 1500]
+    )
+    n_seeds: int = 10
+    base_hazard_seed: int = 3000
+    base_scenario_seed: int = 4000
+    routers: list[str] = field(
+        default_factory=lambda: ["static", "reactive", "time_dependent", "selfish"]
+    )
+    workers: int = 4
+    output_dir: str = "outputs/task5"
+    example_demand: int = 1000
+    example_seed_index: int = 0
+    ci_level: float = 0.95
+
+
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
     """Load a YAML config file into a dataclass.
 
@@ -106,4 +147,6 @@ def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
     with open(path, "r", encoding="utf-8") as f:
         raw: dict[str, Any] = yaml.safe_load(f)
 
-    return config_cls(**raw)
+    fields = {f.name for f in getattr(config_cls, "__dataclass_fields__", {}).values()}
+    filtered = {k: v for k, v in raw.items() if k in fields} if fields else raw
+    return config_cls(**filtered)

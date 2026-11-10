@@ -47,16 +47,18 @@ data layer (OSMnx graph)
 4-person team, 6-week first phase, goal is a strong mid-semester demo.
 
 ## Status and known assumptions (update as we go)
-- Done: Task 1 (graph loader), Task 2 (flood hazard simulator), Task 3 (single-agent routers & failure demo), Task 4 (metrics & statistical experiment runner), Task 4b (sector-based exit placement).
+- Done: Task 1 (graph loader), Task 2 (flood hazard simulator), Task 3 (single-agent routers & failure demo), Task 4 (metrics & statistical experiment runner), Task 4b (sector-based exit placement), Task 5 (multi-agent point-queue simulation, selfish routing, lane-count defaults, demand sweep).
 - Exit placement: Sector-based boundary exits (`exit_mode: sector`) partition the perimeter ring into `n_exits` angular sectors and select the latest-flooding node safe through `(depart_window_min + exit_safe_margin_min)`. Dropping early-flooded sectors prevents artificial corner-clustering bottlenecks.
+- Traffic Model: Discrete event-driven point-queue (Vickrey) simulator. Edges enforce minimum discharge headways `headway_s = 60.0 / flow_capacity` (FIFO discharge) with free-flow traversal delay plus queuing delay. Storage capacity violations are tracked as an edge diagnostic without blocking upstream entries (standard point queue). Trapping in queue checks if the hazard overtakes an edge during queue wait.
+- Lane Defaults: Per-direction lane count parsing with highway type fallback table (`motorway/trunk: 2`, `primary: 2`, `secondary: 2`, `tertiary/residential/unclassified: 1`). Two-way roads with aggregate OSM lane tags are halved.
 - Terrain is SYNTHETIC (generated, not a real DEM). A real DEM and a
   flood calibration against a documented Kolkata event are planned as
   "Task 2b"; the ElevationProvider interface in src/hazard/terrain.py
   is the swap point. Never describe the terrain as real.
 - Flood spread parameters are assumptions, not calibrated values.
-- Flow capacity is nearly uniform (most edges are 1 lane because OSM
-  lane tags are sparse); road-type lane defaults are planned for Task 5.
 - The flood front (~0.5 m/s at default settings) is much slower than
   vehicles, so static-routing failures depend on departure delay,
-  route length, flood speed and (from Task 5) congestion.
+  route length, flood speed and congestion. Under high demand (1000 evacuees),
+  time-dependent routing without coordination funnels traffic onto optimal arterial corridors,
+  creating severe congestion bottlenecks (queue delay 167s vs 70s for selfish routing).
 

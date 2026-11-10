@@ -24,47 +24,74 @@ if TYPE_CHECKING:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _parse_lanes(lanes_raw: str | list | int | float | None, default: int) -> int:
-    """Parse the OSM 'lanes' tag into an integer lane count.
-
-    The tag may be:
-      - an int or float already,
-      - a string like "2",
-      - a semicolon-separated string like "2;3" (take max),
-      - a list of values,
-      - or missing / None  (fall back to *default*).
-    """
+def _parse_lanes_tag(lanes_raw: Any) -> int | None:
+    """Parse the OSM 'lanes' tag into an integer lane count, or None if absent/invalid."""
     if lanes_raw is None:
-        return default
+        return None
 
-    # Already numeric
     if isinstance(lanes_raw, (int, float)):
-        return max(int(lanes_raw), 1)
+        return max(int(round(float(lanes_raw))), 1)
 
-    # List of values → take the max
     if isinstance(lanes_raw, list):
-        parsed = [_parse_lanes(v, default) for v in lanes_raw]
-        return max(parsed) if parsed else default
+        parsed = [_parse_lanes_tag(v) for v in lanes_raw]
+        valid = [p for p in parsed if p is not None]
+        return max(valid) if valid else None
 
-    # String – may contain semicolons
     if isinstance(lanes_raw, str):
         parts = lanes_raw.replace(",", ";").split(";")
         values: list[int] = []
         for p in parts:
             p = p.strip()
             try:
-                values.append(max(int(float(p)), 1))
+                values.append(max(int(round(float(p))), 1))
             except (ValueError, TypeError):
                 continue
-        return max(values) if values else default
+        return max(values) if values else None
 
-    return default
+    return None
+
+
+def _get_highway_default_lanes(highway_raw: Any, cfg: "StudyAreaConfig") -> int:
+    """Determine default per-direction lanes from highway type."""
+    defaults = getattr(cfg, "lanes_by_highway", {})
+    if not highway_raw:
+        return cfg.default_lanes
+
+    if isinstance(highway_raw, str):
+        types = [highway_raw]
+    elif isinstance(highway_raw, list):
+        types = [t for t in highway_raw if isinstance(t, str)]
+    else:
+        types = [str(highway_raw)]
+
+    lane_counts: list[int] = []
+    for hwy in types:
+        base = hwy.removesuffix("_link")
+        if base in defaults:
+            lane_counts.append(defaults[base])
+        else:
+            lane_counts.append(cfg.default_lanes)
+
+    return max(lane_counts) if lane_counts else cfg.default_lanes
 
 
 def _add_lanes_n(G: nx.MultiDiGraph, cfg: "StudyAreaConfig") -> None:
-    """Store the parsed lane count as *lanes_n* (int) on every edge."""
+    """Store lanes_n (int) and lanes_source ('osm'|'default') on every edge."""
     for u, v, k, data in G.edges(keys=True, data=True):
-        data["lanes_n"] = _parse_lanes(data.get("lanes"), cfg.default_lanes)
+        oneway_val = data.get("oneway")
+        is_oneway = oneway_val is True or oneway_val == "True" or oneway_val == "yes" or oneway_val == 1
+
+        raw_tag = _parse_lanes_tag(data.get("lanes"))
+        if raw_tag is not None:
+            if not is_oneway:
+                # Two-way road: OSM tag counts both directions, so take half
+                data["lanes_n"] = max(1, round(raw_tag / 2.0))
+            else:
+                data["lanes_n"] = max(1, raw_tag)
+            data["lanes_source"] = "osm"
+        else:
+            data["lanes_n"] = _get_highway_default_lanes(data.get("highway"), cfg)
+            data["lanes_source"] = "default"
 
 
 def _add_capacity(G: nx.MultiDiGraph, cfg: "StudyAreaConfig") -> None:
@@ -169,6 +196,7 @@ def load_graph(path: str | Path) -> nx.MultiDiGraph:
     _FLOAT_ATTRS = ("length", "speed_kph", "travel_time", "free_flow_time",
                      "flow_capacity")
     _INT_ATTRS = ("capacity", "lanes_n")
+    _STR_ATTRS = ("lanes_source",)
 
     for u, v, k, data in G.edges(keys=True, data=True):
         for attr in _FLOAT_ATTRS:
@@ -177,6 +205,11 @@ def load_graph(path: str | Path) -> nx.MultiDiGraph:
         for attr in _INT_ATTRS:
             if attr in data:
                 data[attr] = int(round(float(data[attr])))
+        for attr in _STR_ATTRS:
+            if attr in data:
+                data[attr] = str(data[attr])
+            else:
+                data[attr] = "default"
 
     return G
 

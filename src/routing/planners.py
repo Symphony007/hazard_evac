@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
-from src.routing.base import Evacuee, Route, Router, RoutingParams
+from src.routing.base import Evacuee, Route, Router, RoutingParams, TrafficView
 from src.routing.search import earliest_arrival_search
 
 if TYPE_CHECKING:
@@ -40,6 +40,7 @@ class StaticRouter(Router):
         current_node: int,
         exits: set[int] | Sequence[int],
         params: RoutingParams,
+        traffic: TrafficView | None = None,
     ) -> Route | None:
         """Compute fastest route on the frozen snapshot at *t_now_s*."""
         return earliest_arrival_search(
@@ -75,6 +76,7 @@ class ReactiveRouter(Router):
         current_node: int,
         exits: set[int] | Sequence[int],
         params: RoutingParams,
+        traffic: TrafficView | None = None,
     ) -> Route | None:
         """Compute fastest route on the frozen snapshot at *t_now_s*."""
         return earliest_arrival_search(
@@ -113,6 +115,7 @@ class TimeDependentRouter(Router):
         current_node: int,
         exits: set[int] | Sequence[int],
         params: RoutingParams,
+        traffic: TrafficView | None = None,
     ) -> Route | None:
         """Compute earliest-arrival route using time-dependent hazard forecast."""
         return earliest_arrival_search(
@@ -123,5 +126,56 @@ class TimeDependentRouter(Router):
             exits=exits,
             params=params,
             mode="time_dependent",
+        )
+
+
+class SelfishRouter(Router):
+    """Selfish routing: 'navigation app' baseline with live congestion delays.
+
+    Semantics
+    ---------
+    Computes earliest-arrival route to any exit in FROZEN mode using the current
+    snapshot at planning time:
+    - Closed edges at t_now_s are excluded.
+    - Hazard speed factors are frozen at t_now_s.
+    - Live congestion delays from traffic.extra_delay_s are added to edge costs.
+    - Has NO flood forecast and no coordination.
+    - Replans before entering an edge if an upcoming planned edge is closed now,
+      and periodically whenever (t - last_plan_time) >= replan_interval_s.
+    """
+
+    name: str = "selfish"
+    replans: bool = True
+    replan_interval_s: float | None = 60.0
+
+    def __init__(self, replan_interval_s: float | None = 60.0) -> None:
+        self.replan_interval_s = replan_interval_s
+
+    def plan(
+        self,
+        G: "nx.MultiDiGraph",
+        hazard: "HazardModel",
+        evacuee: Evacuee,
+        t_now_s: float,
+        current_node: int,
+        exits: set[int] | Sequence[int],
+        params: RoutingParams,
+        traffic: TrafficView | None = None,
+    ) -> Route | None:
+        """Compute fastest route using frozen hazard snapshot plus live traffic delay."""
+        extra_delay_fn = (
+            (lambda u, v, k, t: traffic.extra_delay_s(u, v, k, t))
+            if traffic is not None
+            else None
+        )
+        return earliest_arrival_search(
+            G=G,
+            hazard=hazard,
+            source=current_node,
+            t_start=t_now_s,
+            exits=exits,
+            params=params,
+            mode="frozen",
+            extra_delay=extra_delay_fn,
         )
 
