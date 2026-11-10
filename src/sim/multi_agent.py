@@ -88,6 +88,9 @@ def simulate_population(
     traffic_state = TrafficState(G)
     exits_set = set(exits)
 
+    # Optional pre-run router initialization / offline pre-planning
+    router.prepare(G, hazard, agents, exits_set, params, traffic_cfg)
+
     # Priority queue: (time, agent_id, node)
     # Tie-breaking by agent_id ensures strict determinism.
     pq: list[tuple[float, int, int]] = []

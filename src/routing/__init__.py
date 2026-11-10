@@ -1,4 +1,5 @@
 from src.routing.base import Evacuee, Route, Router, RoutingParams, TrafficView
+from src.routing.coordinated import CoordinatedRouter
 from src.routing.planners import (
     ReactiveRouter,
     SelfishRouter,
@@ -17,6 +18,7 @@ __all__ = [
     "ReactiveRouter",
     "TimeDependentRouter",
     "SelfishRouter",
+    "CoordinatedRouter",
     "earliest_arrival_search",
 ]
 

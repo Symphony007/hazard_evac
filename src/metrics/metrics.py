@@ -75,6 +75,7 @@ def per_agent_frame(
 def run_metrics(
     df: pd.DataFrame,
     edge_stats: pd.DataFrame | None = None,
+    ceiling_pct: float | None = None,
 ) -> dict[str, float | int]:
     """Compute aggregate evaluation metrics from a per-agent DataFrame.
 
@@ -82,6 +83,10 @@ def run_metrics(
     ------------------
     - pct_safe : float
         Percentage of evacuees that reach a safe exit (0 to 100).
+    - ceiling_pct : float
+        Single-agent time_dependent oracle ceiling (% of agents savable with unlimited capacity).
+    - congestion_loss_pct : float
+        Congestion loss percentage (ceiling_pct - pct_safe).
     - mean_evac_min : float
         Mean evacuation duration in minutes for safe evacuees (NaN if 0 safe).
     - p90_evac_min : float
@@ -125,6 +130,8 @@ def run_metrics(
     if n_agents == 0:
         return {
             "pct_safe": float(np.nan),
+            "ceiling_pct": float(np.nan),
+            "congestion_loss_pct": float(np.nan),
             "mean_evac_min": float(np.nan),
             "p90_evac_min": float(np.nan),
             "last_evac_min": float(np.nan),
@@ -179,8 +186,13 @@ def run_metrics(
         mean_queue_delay_s = float(np.nan)
         p90_queue_delay_s = float(np.nan)
 
+    ceiling_val = float(ceiling_pct) if ceiling_pct is not None else float(np.nan)
+    loss_val = float(ceiling_pct - pct_safe) if ceiling_pct is not None else float(np.nan)
+
     return {
         "pct_safe": pct_safe,
+        "ceiling_pct": ceiling_val,
+        "congestion_loss_pct": loss_val,
         "mean_evac_min": mean_evac,
         "p90_evac_min": p90_evac,
         "last_evac_min": last_evac,

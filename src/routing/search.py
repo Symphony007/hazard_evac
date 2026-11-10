@@ -36,8 +36,10 @@ def earliest_arrival_search(
     t_start: float,
     exits: set[int] | Sequence[int],
     params: RoutingParams,
-    mode: Literal["frozen", "time_dependent"],
+    mode: Literal["frozen", "time_dependent", "reservation"],
     extra_delay: Callable[[int, int, int, float], float] | None = None,
+    table: Any | None = None,
+    flood_safety_margin_s: float = 0.0,
 ) -> Route | None:
     """Find the earliest-arrival route from *source* to any exit.
 
@@ -55,11 +57,20 @@ def earliest_arrival_search(
         Target exit node IDs.
     params : RoutingParams
         Speed scale and speed-factor floor parameters.
-    mode : {"frozen", "time_dependent"}
+    mode : {"frozen", "time_dependent", "reservation"}
         - "frozen": Edge costs and closures evaluated statically at *t_start*.
           Edges closed at *t_start* are removed. Edge cost = tt(e, t_start).
         - "time_dependent": Edge cost tt(e, t_u) evaluated at arrival time t_u at
           tail u. Edge is unusable if t_u + tt >= hazard.edge_arrival_time(u, v, k).
+        - "reservation": Evaluated at arrival time t_u at tail u. Edge traversal
+          tau = tt(e, t_u), and exit slot x = table.earliest_exit(e, t_u + tau).
+          Usable iff x < hazard.edge_arrival_time(u, v, k) - flood_safety_margin_s.
+    extra_delay : Callable, optional
+        Extra delay function for frozen / selfish mode.
+    table : ReservationTable, optional
+        Capacity reservation table used in "reservation" mode.
+    flood_safety_margin_s : float
+        Safety buffer in seconds subtracted from edge closure time in reservation mode.
 
     Returns
     -------
@@ -79,14 +90,15 @@ def earliest_arrival_search(
             planned_arrival_s=t_start,
         )
 
-    # In time_dependent mode, if source itself is flooded at departure, cannot leave
-    if mode == "time_dependent":
+    # In dynamic modes, if source itself is flooded at departure, cannot leave
+    if mode in ("time_dependent", "reservation"):
         if hazard.is_node_flooded(source, t_start):
             return None
 
     speed_scale = params.vehicle_speed_scale
     sf_floor = params.sf_floor
     is_frozen = (mode == "frozen")
+    is_reservation = (mode == "reservation")
 
     # Priority queue: (arrival_time, node)
     pq: list[tuple[float, int]] = [(t_start, source)]
@@ -123,6 +135,18 @@ def earliest_arrival_search(
                 tt = fft / speed_scale / sf
                 delay = extra_delay(u, v, k, t_start) if extra_delay is not None else 0.0
                 t_arr = t_u + tt + max(0.0, float(delay))
+            elif is_reservation:
+                # Reservation-aware search
+                if hazard.is_edge_closed(u, v, k, t_u):
+                    continue
+                sf = max(hazard.edge_speed_factor(u, v, k, t_u), sf_floor)
+                tt = fft / speed_scale / sf
+                y = t_u + tt
+                x = table.earliest_exit((u, v, k), y) if table is not None else y
+                a_e = hazard.edge_arrival_time(u, v, k)
+                if x >= a_e - flood_safety_margin_s:
+                    continue
+                t_arr = x
             else:
                 # Time-dependent: evaluated at arrival time at u (t_u)
                 if hazard.is_edge_closed(u, v, k, t_u):

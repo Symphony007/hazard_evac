@@ -1,0 +1,4 @@
+planning_mode: online        # online | offline
+flood_safety_margin_s: 0.0
+replan_interval_s: null
+

@@ -108,6 +108,15 @@ class TrafficConfig:
 
 
 @dataclass
+class CoordinatedConfig:
+    """Configuration for coordinated capacity reservation router."""
+
+    planning_mode: str = "online"
+    flood_safety_margin_s: float = 0.0
+    replan_interval_s: float | None = None
+
+
+@dataclass
 class CongestionConfig:
     """Configuration for multi-agent demand sweep experiments."""
 

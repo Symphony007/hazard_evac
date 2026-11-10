@@ -100,6 +100,22 @@ class Router(ABC):
     replans: bool = False
     replan_interval_s: float | None = None
 
+    def prepare(
+        self,
+        G: "nx.MultiDiGraph",
+        hazard: "HazardModel",
+        agents: Sequence[Evacuee],
+        exits: set[int] | Sequence[int],
+        params: RoutingParams,
+        traffic_cfg: Any | None = None,
+    ) -> None:
+        """Optional hook called once per simulation run before the event loop.
+
+        Subclasses may initialize or reset state, such as pre-planning offline
+        schedules or resetting a capacity reservation table. Default is a no-op.
+        """
+        pass
+
     @abstractmethod
     def plan(
         self,
