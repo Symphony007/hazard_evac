@@ -1,0 +1,7 @@
+dt_s: 5
+horizon_s: 2400
+big_m_factor: 10
+max_arcs: 6000000
+max_solve_s: 1800
+rounding: ceil
+

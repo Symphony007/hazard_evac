@@ -137,6 +137,18 @@ class CongestionConfig:
     ci_level: float = 0.95
 
 
+@dataclass
+class ExactConfig:
+    """Configuration for exact time-expanded min-cost flow benchmark."""
+
+    dt_s: int = 5
+    horizon_s: int = 2400
+    big_m_factor: int = 10
+    max_arcs: int = 6000000
+    max_solve_s: int = 1800
+    rounding: str = "ceil"
+
+
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
     """Load a YAML config file into a dataclass.
 
