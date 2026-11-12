@@ -82,6 +82,28 @@ class RoutingParams:
     sf_floor: float = 0.05
 
 
+def make_routing_params(scenario_cfg: Any) -> RoutingParams:
+    """Create RoutingParams from a scenario configuration object or dictionary.
+
+    Parameters
+    ----------
+    scenario_cfg : ScenarioConfig or Any
+        Configuration holding vehicle_speed_scale and sf_floor.
+
+    Returns
+    -------
+    RoutingParams
+        Constructed routing parameters.
+    """
+    if isinstance(scenario_cfg, dict):
+        vss = float(scenario_cfg.get("vehicle_speed_scale", 1.0))
+        sff = float(scenario_cfg.get("sf_floor", 0.05))
+    else:
+        vss = float(getattr(scenario_cfg, "vehicle_speed_scale", 1.0))
+        sff = float(getattr(scenario_cfg, "sf_floor", 0.05))
+    return RoutingParams(vehicle_speed_scale=vss, sf_floor=sff)
+
+
 class Router(ABC):
     """Abstract router interface.
 

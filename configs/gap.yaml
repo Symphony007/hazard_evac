@@ -1,0 +1,9 @@
+flood_speed_m_per_min: 60
+demand_levels: [1500, 2000, 2500]
+n_seeds: 5
+base_hazard_seed: 3000      # same seeds as the ladder experiment
+base_scenario_seed: 4000
+heuristics: [time_dependent, selfish, selfish_forecast, coordinated_online]
+workers: 2                  # each worker holds a 2-3M arc model
+output_dir: outputs/task7
+

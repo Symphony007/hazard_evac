@@ -32,7 +32,7 @@ from src.exact.time_expanded import build_network, solve  # noqa: E402
 from src.experiment.ladder_runner import instantiate_router  # noqa: E402
 from src.graph.loader import get_or_build_graph  # noqa: E402
 from src.hazard.flood import FloodHazard  # noqa: E402
-from src.routing.base import RoutingParams  # noqa: E402
+from src.routing.base import RoutingParams, make_routing_params  # noqa: E402
 from src.routing.planners import TimeDependentRouter  # noqa: E402
 from src.scenario import build_exits, generate_agents  # noqa: E402
 from src.sim.multi_agent import simulate_population  # noqa: E402
@@ -106,10 +106,7 @@ def main() -> None:
         rng=rng,
     )
     agents = full_sample[:args.demand]
-    routing_params = RoutingParams(
-        vehicle_speed_scale=scenario_cfg.vehicle_speed_scale,
-        sf_floor=scenario_cfg.sf_floor,
-    )
+    routing_params = make_routing_params(scenario_cfg)
 
     modes_to_run = ["ceil", "floor"] if args.rounding == "both" else [args.rounding]
 

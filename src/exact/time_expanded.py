@@ -130,6 +130,7 @@ class ExactModel:
     K: int
     n_agents: int
     rounding: str = "ceil"
+    agents: Sequence[Evacuee] | None = None
 
 
 @dataclass
@@ -469,6 +470,7 @@ def build_network(
         K=K,
         n_agents=n_agents,
         rounding=rounding,
+        agents=agents,
     )
 
 

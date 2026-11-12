@@ -28,7 +28,7 @@ from src.config import (
 from src.graph.loader import get_or_build_graph
 from src.hazard.flood import FloodHazard
 from src.metrics.metrics import per_agent_frame, run_metrics
-from src.routing.base import Evacuee, Router, RoutingParams
+from src.routing.base import Evacuee, Router, RoutingParams, make_routing_params
 from src.routing.coordinated import CoordinatedRouter
 from src.routing.planners import (
     ReactiveRouter,
@@ -224,10 +224,7 @@ def run_single_ladder(
 
     # 4. Shortest static baseline length
     baseline_len = shortest_baseline_length(G, exits)
-    routing_params = RoutingParams(
-        vehicle_speed_scale=scenario_cfg.vehicle_speed_scale,
-        sf_floor=scenario_cfg.sf_floor,
-    )
+    routing_params = make_routing_params(scenario_cfg)
 
     # 5. Compute single-agent oracle ceiling (% safe with infinite capacity)
     if existing_record is not None and "ceiling_pct" in existing_record and existing_record["ceiling_pct"] is not None:
@@ -386,10 +383,7 @@ def run_ladder_experiment(
             rng=rng,
         )
         agents = full_sample[:dry_demand]
-        routing_params = RoutingParams(
-            vehicle_speed_scale=scenario_cfg.vehicle_speed_scale,
-            sf_floor=scenario_cfg.sf_floor,
-        )
+        routing_params = make_routing_params(scenario_cfg)
 
         router = instantiate_router("selfish_forecast", traffic_cfg, coord_cfg)
         t0 = time.perf_counter()

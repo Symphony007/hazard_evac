@@ -149,6 +149,23 @@ class ExactConfig:
     rounding: str = "ceil"
 
 
+@dataclass
+class GapConfig:
+    """Configuration for Task 7b optimality-gap experiment."""
+
+    flood_speed_m_per_min: float = 60.0
+    demand_levels: list[int] = field(default_factory=lambda: [1500, 2000, 2500])
+    n_seeds: int = 5
+    base_hazard_seed: int = 3000
+    base_scenario_seed: int = 4000
+    heuristics: list[str] = field(
+        default_factory=lambda: ["time_dependent", "selfish", "selfish_forecast", "coordinated_online"]
+    )
+    workers: int = 2
+    output_dir: str = "outputs/task7"
+    ci_level: float = 0.95
+
+
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
     """Load a YAML config file into a dataclass.
 
