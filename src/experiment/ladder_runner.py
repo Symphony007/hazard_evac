@@ -32,6 +32,7 @@ from src.routing.base import Evacuee, Router, RoutingParams
 from src.routing.coordinated import CoordinatedRouter
 from src.routing.planners import (
     ReactiveRouter,
+    SelfishForecastRouter,
     SelfishRouter,
     StaticRouter,
     TimeDependentRouter,
@@ -72,6 +73,8 @@ def instantiate_router(
         return TimeDependentRouter()
     elif name == "selfish":
         return SelfishRouter(replan_interval_s=traffic_cfg.replan_interval_s)
+    elif name == "selfish_forecast":
+        return SelfishForecastRouter(replan_interval_s=traffic_cfg.replan_interval_s)
     elif name == "coordinated_online":
         return CoordinatedRouter(
             planning_mode="online",
@@ -136,9 +139,30 @@ def run_single_ladder(
     csv_path = raw_dir / f"agents_{token}.csv"
     json_path = raw_dir / f"run_{token}.json"
 
-    if not force and csv_path.exists() and json_path.exists():
-        with open(json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    existing_record: dict[str, Any] | None = None
+    existing_agents_df: pd.DataFrame | None = None
+
+    if not force and json_path.exists():
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                existing_record = json.load(f)
+        except Exception:
+            existing_record = None
+
+    if not force and csv_path.exists():
+        try:
+            existing_agents_df = pd.read_csv(csv_path)
+        except Exception:
+            existing_agents_df = None
+
+    requested_routers = list(cong_cfg.routers)
+    existing_metrics = existing_record.get("metrics", {}) if existing_record is not None else {}
+    missing_routers = [r for r in requested_routers if r not in existing_metrics]
+
+    if not force and not missing_routers and existing_record is not None and existing_agents_df is not None:
+        return existing_record
+
+    routers_to_run = requested_routers if (force or existing_record is None) else missing_routers
 
     if G is None:
         G = get_or_build_graph(graph_cfg)
@@ -197,19 +221,22 @@ def run_single_ladder(
     )
 
     # 5. Compute single-agent oracle ceiling (% safe with infinite capacity)
-    ceiling_pct = compute_oracle_ceiling(
-        G=G,
-        hazard=hazard,
-        agents=agents,
-        exits=exits,
-        params=routing_params,
-    )
+    if existing_record is not None and "ceiling_pct" in existing_record and existing_record["ceiling_pct"] is not None:
+        ceiling_pct = float(existing_record["ceiling_pct"])
+    else:
+        ceiling_pct = compute_oracle_ceiling(
+            G=G,
+            hazard=hazard,
+            agents=agents,
+            exits=exits,
+            params=routing_params,
+        )
 
-    # 6. Simulate each router
-    all_agent_frames = []
-    router_metrics: dict[str, dict[str, Any]] = {}
+    # 6. Simulate only the missing / requested routers
+    new_agent_frames = []
+    new_metrics: dict[str, dict[str, Any]] = {}
 
-    for r_name in cong_cfg.routers:
+    for r_name in routers_to_run:
         router = instantiate_router(r_name, traffic_cfg, coord_cfg)
         pop_res = simulate_population(
             G=G,
@@ -224,35 +251,47 @@ def run_single_ladder(
         df_agent = per_agent_frame(pop_res.agent_results, baseline_len)
         df_agent["demand"] = int(demand)
         df_agent["seed_index"] = int(seed_index)
-        all_agent_frames.append(df_agent)
+        new_agent_frames.append(df_agent)
 
         r_metrics = run_metrics(
             df_agent,
             edge_stats=pop_res.edge_stats,
             ceiling_pct=ceiling_pct,
         )
-        router_metrics[router.name] = r_metrics
+        new_metrics[router.name] = r_metrics
 
-    # Save per-agent raw CSV
-    combined_agents_df = pd.concat(all_agent_frames, ignore_index=True)
+    # 7. Merge with existing raw outputs
+    if existing_agents_df is not None and not force:
+        clean_df = existing_agents_df[~existing_agents_df["router_name"].isin(routers_to_run)]
+        combined_agents_df = pd.concat([clean_df] + new_agent_frames, ignore_index=True)
+    else:
+        combined_agents_df = pd.concat(new_agent_frames, ignore_index=True)
+
+    merged_metrics = dict(existing_metrics) if (existing_record and not force) else {}
+    merged_metrics.update(new_metrics)
+
+    if existing_record is not None and not force:
+        run_record = dict(existing_record)
+        run_record["metrics"] = merged_metrics
+        run_record["ceiling_pct"] = float(ceiling_pct)
+    else:
+        run_record = {
+            "demand": int(demand),
+            "seed_index": int(seed_index),
+            "flood_speed_m_per_min": float(cong_cfg.flood_speed_m_per_min),
+            "hazard_seed": hazard_seed,
+            "scenario_seed": scenario_seed,
+            "used_fallback_exits": bool(used_fallback_exits),
+            "n_fallback_exits": int(n_fallback_exits),
+            "n_exits_effective": int(n_exits_effective),
+            "departure_window_capped": bool(departure_window_capped),
+            "n_agents": len(agents),
+            "ceiling_pct": float(ceiling_pct),
+            "exit_spread": spread_report,
+            "metrics": merged_metrics,
+        }
+
     combined_agents_df.to_csv(csv_path, index=False)
-
-    run_record: dict[str, Any] = {
-        "demand": int(demand),
-        "seed_index": int(seed_index),
-        "flood_speed_m_per_min": float(cong_cfg.flood_speed_m_per_min),
-        "hazard_seed": hazard_seed,
-        "scenario_seed": scenario_seed,
-        "used_fallback_exits": bool(used_fallback_exits),
-        "n_fallback_exits": int(n_fallback_exits),
-        "n_exits_effective": int(n_exits_effective),
-        "departure_window_capped": bool(departure_window_capped),
-        "n_agents": len(agents),
-        "ceiling_pct": float(ceiling_pct),
-        "exit_spread": spread_report,
-        "metrics": router_metrics,
-    }
-
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(_json_serializable(run_record), f, indent=2)
 
@@ -289,11 +328,26 @@ def run_ladder_experiment(
 
     # --- Dry-run timing ---
     if dry_run:
-        dry_demand = 3000 if 3000 in cong_cfg.demand_levels else max(cong_cfg.demand_levels)
+        dry_demand = 2000 if 2000 in demand_levels else (demand_levels[-1] if demand_levels else 2000)
         print("=" * 75)
-        print(f"[dry-run] Benchmarking single run at demand={dry_demand}, seed_index=0")
-        print(f"[dry-run] Routers: {cong_cfg.routers}")
+        print(f"[dry-run] Benchmarking ONLY missing router 'selfish_forecast' at demand={dry_demand}, seed_index=0")
         print("=" * 75)
+
+        raw_dir = Path(cong_cfg.output_dir) / "raw"
+        missing_tasks = []
+        for d in demand_levels:
+            for s in seed_indices:
+                jp = raw_dir / f"run_demand{d}_seed{s}.json"
+                if not jp.exists():
+                    missing_tasks.append((d, s))
+                else:
+                    try:
+                        with open(jp, "r", encoding="utf-8") as f:
+                            rec = json.load(f)
+                        if "selfish_forecast" not in rec.get("metrics", {}):
+                            missing_tasks.append((d, s))
+                    except Exception:
+                        missing_tasks.append((d, s))
 
         h_seed = cong_cfg.base_hazard_seed
         s_seed = cong_cfg.base_scenario_seed
@@ -327,38 +381,30 @@ def run_ladder_experiment(
             sf_floor=scenario_cfg.sf_floor,
         )
 
-        t0_ceil = time.perf_counter()
-        ceil_val = compute_oracle_ceiling(G, hazard, agents, exits, routing_params)
-        dt_ceil = time.perf_counter() - t0_ceil
-        print(f"  Oracle ceiling ({len(agents)} agents): {dt_ceil:.2f} s (ceiling={ceil_val:.1f}%)")
+        router = instantiate_router("selfish_forecast", traffic_cfg, coord_cfg)
+        t0 = time.perf_counter()
+        pop_res = simulate_population(
+            G=G,
+            hazard=hazard,
+            router=router,
+            agents=agents,
+            exits=exits,
+            params=routing_params,
+            traffic_cfg=traffic_cfg,
+        )
+        dt = time.perf_counter() - t0
+        n_safe = sum(1 for r in pop_res.agent_results if r.safe)
+        pct = 100.0 * n_safe / len(agents)
+        print(f"  Router selfish_forecast   : {dt:.2f} s (pct_safe={pct:.1f}%)")
 
-        router_timings: dict[str, float] = {}
-        for r_name in cong_cfg.routers:
-            router = instantiate_router(r_name, traffic_cfg, coord_cfg)
-            t0 = time.perf_counter()
-            pop_res = simulate_population(
-                G=G,
-                hazard=hazard,
-                router=router,
-                agents=agents,
-                exits=exits,
-                params=routing_params,
-                traffic_cfg=traffic_cfg,
-            )
-            dt = time.perf_counter() - t0
-            n_safe = sum(1 for r in pop_res.agent_results if r.safe)
-            pct = 100.0 * n_safe / len(agents)
-            router_timings[r_name] = dt
-            print(f"  Router {r_name:<20}: {dt:.2f} s (pct_safe={pct:.1f}%)")
-
-        total_single_run_s = dt_ceil + sum(router_timings.values())
+        missing_count = len(missing_tasks)
         total_tasks = len(demand_levels) * len(seed_indices)
-        est_total_seq_s = total_single_run_s * total_tasks
+        est_total_seq_s = dt * missing_count
         est_parallel_s = est_total_seq_s / max(1, workers)
 
         print("-" * 75)
-        print(f"Total time for single run (demand {dry_demand}): {total_single_run_s:.2f} s")
-        print(f"Estimated full experiment ({total_tasks} runs across {workers} workers):")
+        print(f"Missing runs to fill in: {missing_count} (out of {total_tasks} configured runs)")
+        print(f"Estimated time to fill all missing runs ({workers} workers):")
         print(f"  Sequential estimate : {est_total_seq_s:.1f} s ({est_total_seq_s / 60.0:.1f} min)")
         print(f"  Parallel estimate   : {est_parallel_s:.1f} s ({est_parallel_s / 60.0:.1f} min)")
         print("=" * 75)

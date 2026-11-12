@@ -153,7 +153,9 @@ def earliest_arrival_search(
                     continue
                 sf = max(hazard.edge_speed_factor(u, v, k, t_u), sf_floor)
                 tt = fft / speed_scale / sf
-                t_arr = t_u + tt
+                # Optional live congestion snapshot delay d(e), assumed constant over planned trip
+                delay = extra_delay(u, v, k, t_start) if extra_delay is not None else 0.0
+                t_arr = t_u + tt + max(0.0, float(delay))
                 # Usability rule: agent must clear the edge before flood arrival
                 a_e = hazard.edge_arrival_time(u, v, k)
                 if t_arr >= a_e:

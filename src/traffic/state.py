@@ -78,7 +78,7 @@ class TrafficState:
         """
         h = self.headway[edge]
         prev_exit = self.last_exit[edge]
-        t_exit = max(t + tau, prev_exit + h)
+        t_exit = (t + tau) if h <= 1e-6 else max(t + tau, prev_exit + h)
         queue_wait = max(0.0, t_exit - (t + tau))
 
         self.last_exit[edge] = t_exit
@@ -124,6 +124,8 @@ class TrafficState:
         if edge not in self.headway:
             return 0.0
         h = self.headway[edge]
+        if h <= 1e-6:
+            return 0.0
         prev_exit = self.last_exit[edge]
         return max(0.0, prev_exit + h - (t + tau))
 

@@ -40,6 +40,7 @@ ROUTER_COLORS = {
     "static": "#7f7f7f",
     "time_dependent": "#1f77b4",
     "selfish": "#ff7f0e",
+    "selfish_forecast": "#d62728",
     "coordinated_online": "#2ca02c",
     "coordinated_offline": "#9467bd",
 }
@@ -48,20 +49,38 @@ ROUTER_MARKERS = {
     "static": "o",
     "time_dependent": "s",
     "selfish": "^",
+    "selfish_forecast": "v",
     "coordinated_online": "D",
     "coordinated_offline": "*",
 }
 
 
-def load_all_json_records(output_dir: Path) -> list[dict[str, Any]]:
-    """Load all raw JSON run records from output_dir / 'raw'."""
+def load_all_json_records(
+    output_dir: Path,
+    allowed_demands: set[int] | None = None,
+    allowed_seeds: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Load raw JSON run records, strictly filtering to allowed demands and seeds."""
     raw_dir = output_dir / "raw"
     records = []
     if not raw_dir.exists():
         return records
     for path in sorted(raw_dir.glob("run_demand*_seed*.json")):
         with open(path, "r", encoding="utf-8") as f:
-            records.append(json.load(f))
+            rec = json.load(f)
+        d = int(rec.get("demand", -1))
+        s = int(rec.get("seed_index", -1))
+        if allowed_demands is not None and d not in allowed_demands:
+            continue
+        if allowed_seeds is not None and s not in allowed_seeds:
+            continue
+        records.append(rec)
+
+    counts: dict[int, int] = {}
+    for r in records:
+        d = r["demand"]
+        counts[d] = counts.get(d, 0) + 1
+    print(f"[ladder] Aggregated runs per demand: {dict(sorted(counts.items()))}")
     return records
 
 
@@ -123,7 +142,14 @@ def build_summary_dataframe(
 
     res = pd.DataFrame(summary_rows)
     # Sort demands numerically, routers predictably
-    router_order = ["static", "time_dependent", "selfish", "coordinated_online", "coordinated_offline"]
+    router_order = [
+        "static",
+        "time_dependent",
+        "selfish",
+        "selfish_forecast",
+        "coordinated_online",
+        "coordinated_offline",
+    ]
     res["r_rank"] = res["router"].map(lambda x: router_order.index(x) if x in router_order else 99)
     res = res.sort_values(["demand", "r_rank"]).drop(columns=["r_rank"])
     return res
@@ -132,9 +158,10 @@ def build_summary_dataframe(
 def build_paired_diffs(
     records: list[dict[str, Any]],
     comparisons: list[tuple[str, str]],
+    raw_dir: Path,
     ci_level: float = 0.95,
 ) -> pd.DataFrame:
-    """Compute paired differences across seeds per demand level."""
+    """Compute paired differences across seeds per demand level, including common-safe evac time."""
     rows = []
     demands = sorted(list({r["demand"] for r in records}))
 
@@ -166,43 +193,126 @@ def build_paired_diffs(
                             "ci_high": res.ci_high,
                             "p_ttest": res.p_ttest,
                             "p_wilcoxon": res.p_wilcoxon,
+                            "n_common_safe_mean": np.nan,
                         }
                     )
+
+            # Common-safe evacuation duration metric: mean_evac_min_common_safe
+            common_a = []
+            common_b = []
+            common_counts = []
+            for rec in sorted(d_records, key=lambda x: x["seed_index"]):
+                token = f"demand{d}_seed{rec['seed_index']}"
+                csv_path = raw_dir / f"agents_{token}.csv"
+                if not csv_path.exists():
+                    continue
+                try:
+                    df_agents = pd.read_csv(csv_path)
+                    df_a = df_agents[df_agents["router_name"] == name_a]
+                    df_b = df_agents[df_agents["router_name"] == name_b]
+                    safe_a = set(df_a[df_a["safe"]]["agent_id"])
+                    safe_b = set(df_b[df_b["safe"]]["agent_id"])
+                    common_ids = safe_a & safe_b
+                    if common_ids:
+                        t_a = df_a[df_a["agent_id"].isin(common_ids)]["evac_time_s"].dropna().values / 60.0
+                        t_b = df_b[df_b["agent_id"].isin(common_ids)]["evac_time_s"].dropna().values / 60.0
+                        if len(t_a) > 0 and len(t_b) > 0:
+                            common_a.append(float(np.mean(t_a)))
+                            common_b.append(float(np.mean(t_b)))
+                            common_counts.append(len(common_ids))
+                except Exception:
+                    continue
+
+            if len(common_a) >= 2:
+                res_common = paired_diff_ci(common_a, common_b, level=ci_level)
+                rows.append(
+                    {
+                        "demand": d,
+                        "metric": "mean_evac_min_common_safe",
+                        "comparison": f"{name_a} - {name_b}",
+                        "router_a": name_a,
+                        "router_b": name_b,
+                        "n_pairs": res_common.n,
+                        "mean_diff": res_common.mean_diff,
+                        "ci_low": res_common.ci_low,
+                        "ci_high": res_common.ci_high,
+                        "p_ttest": res_common.p_ttest,
+                        "p_wilcoxon": res_common.p_wilcoxon,
+                        "n_common_safe_mean": float(np.mean(common_counts)),
+                    }
+                )
 
     return pd.DataFrame(rows)
 
 
 def build_poa_table(
     records: list[dict[str, Any]],
+    raw_dir: Path,
     ci_level: float = 0.95,
 ) -> pd.DataFrame:
-    """Compute Price of Anarchy (mean_evac_min(selfish) / mean_evac_min(router))."""
+    """Compute Price of Anarchy evaluated strictly on the common-safe set."""
     rows = []
     demands = sorted(list({r["demand"] for r in records}))
-    target_routers = ["static", "time_dependent", "coordinated_online", "coordinated_offline"]
+    comparisons = [("selfish_forecast", "coordinated_online"), ("selfish", "coordinated_online")]
 
     for d in demands:
         d_records = [r for r in records if r["demand"] == d]
-        for r_name in target_routers:
+        for base_r, comp_r in comparisons:
             poa_vals = []
+            gain_vals = []
+            common_counts = []
+
             for rec in sorted(d_records, key=lambda x: x["seed_index"]):
-                m_self = rec.get("metrics", {}).get("selfish", {})
-                m_r = rec.get("metrics", {}).get(r_name, {})
-                t_self = m_self.get("mean_evac_min")
-                t_r = m_r.get("mean_evac_min")
-                if t_self and t_r and t_r > 0:
-                    poa_vals.append(float(t_self) / float(t_r))
+                token = f"demand{d}_seed{rec['seed_index']}"
+                csv_path = raw_dir / f"agents_{token}.csv"
+                if not csv_path.exists():
+                    continue
+                try:
+                    df_agents = pd.read_csv(csv_path)
+                    df_base = df_agents[df_agents["router_name"] == base_r]
+                    df_comp = df_agents[df_agents["router_name"] == comp_r]
+                    safe_base = set(df_base[df_base["safe"]]["agent_id"])
+                    safe_comp = set(df_comp[df_comp["safe"]]["agent_id"])
+                    common_ids = safe_base & safe_comp
+                    if common_ids:
+                        t_base = df_base[df_base["agent_id"].isin(common_ids)]["evac_time_s"].dropna().values / 60.0
+                        t_comp = df_comp[df_comp["agent_id"].isin(common_ids)]["evac_time_s"].dropna().values / 60.0
+                        if len(t_base) > 0 and len(t_comp) > 0:
+                            m_base = float(np.mean(t_base))
+                            m_comp = float(np.mean(t_comp))
+                            if m_comp > 0:
+                                poa_vals.append(m_base / m_comp)
+                                common_counts.append(len(common_ids))
+
+                    m_rec = rec.get("metrics", {})
+                    if comp_r in m_rec and base_r in m_rec:
+                        p_comp = m_rec[comp_r].get("pct_safe")
+                        p_base = m_rec[base_r].get("pct_safe")
+                        if p_comp is not None and p_base is not None:
+                            gain_vals.append(float(p_comp) - float(p_base))
+                except Exception:
+                    continue
 
             if len(poa_vals) >= 2:
-                m_val, c_low, c_high = mean_ci(poa_vals, level=ci_level)
+                p_mean, p_low, p_high = mean_ci(poa_vals, level=ci_level)
+                g_mean, g_low, g_high = (
+                    mean_ci(gain_vals, level=ci_level)
+                    if len(gain_vals) >= 2
+                    else (np.nan, np.nan, np.nan)
+                )
                 rows.append(
                     {
                         "demand": d,
-                        "router": r_name,
+                        "baseline_router": base_r,
+                        "comparison_router": comp_r,
                         "n_seeds": len(poa_vals),
-                        "poa_mean": m_val,
-                        "poa_ci_low": c_low,
-                        "poa_ci_high": c_high,
+                        "n_common_safe_mean": float(np.mean(common_counts)),
+                        "poa_evac_common_mean": p_mean,
+                        "poa_evac_common_ci_low": p_low,
+                        "poa_evac_common_ci_high": p_high,
+                        "gain_safe_pp_mean": g_mean,
+                        "gain_safe_pp_ci_low": g_low,
+                        "gain_safe_pp_ci_high": g_high,
                     }
                 )
 
@@ -392,34 +502,38 @@ def print_tables(
     print("=" * 105)
 
     if not paired_df.empty:
-        print("\n" + "=" * 95)
-        print("PAIRED DIFFERENCES ACROSS ROUTERS")
-        print("=" * 95)
-        print(f"{'Demand':<8} {'Metric':<20} {'Comparison':<35} {'Mean Diff (95% CI)':<22} {'p (t-test)':<10}")
-        print("-" * 95)
+        print("\n" + "=" * 105)
+        print("PAIRED DIFFERENCES ACROSS ROUTERS (with Common-Safe Evac Time)")
+        print("=" * 105)
+        print(f"{'Demand':<8} {'Metric':<28} {'Comparison':<38} {'Mean Diff (95% CI)':<24} {'p (t-test)':<10} {'Details'}")
+        print("-" * 105)
         for _, p_row in paired_df.iterrows():
             d = int(p_row["demand"])
             met = str(p_row["metric"])
             comp = str(p_row["comparison"])
             diff = f"{p_row['mean_diff']:+.2f} [{p_row['ci_low']:.2f}, {p_row['ci_high']:.2f}]"
             p_val = f"{p_row['p_ttest']:.4f}"
-            print(f"{d:<8} {met:<20} {comp:<35} {diff:<22} {p_val:<10}")
-        print("=" * 95)
+            c_info = f"N_common={p_row['n_common_safe_mean']:.0f}" if pd.notna(p_row.get("n_common_safe_mean")) else ""
+            print(f"{d:<8} {met:<28} {comp:<38} {diff:<24} {p_val:<10} {c_info}")
+        print("=" * 105)
 
     if not poa_df.empty:
-        print("\n" + "=" * 70)
-        print("PRICE OF ANARCHY (Evacuation Duration vs Selfish)")
-        print("PoA = mean_evac_min(selfish) / mean_evac_min(router)")
-        print("=" * 70)
-        print(f"{'Demand':<8} {'Router':<22} {'PoA Mean':<12} {'95% CI':<20}")
-        print("-" * 70)
+        print("\n" + "=" * 95)
+        print("PRICE OF ANARCHY ON COMMON-SAFE SET & SURVIVAL GAIN")
+        print("  poa_evac_common = mean_evac_min(baseline) / mean_evac_min(coordinated_online) [common-safe]")
+        print("  gain_safe_pp    = pct_safe(coordinated_online) - pct_safe(baseline)")
+        print("  [Note: Old survivor-confounded PoA is replaced by common-safe evaluation]")
+        print("=" * 95)
+        print(f"{'Demand':<8} {'Baseline':<20} {'PoA Common (95% CI)':<26} {'Safe Gain pp (95% CI)':<24} {'Common N':<10}")
+        print("-" * 95)
         for _, r_row in poa_df.iterrows():
             d = int(r_row["demand"])
-            r = str(r_row["router"])
-            poa_m = f"{r_row['poa_mean']:.3f}"
-            poa_ci = f"[{r_row['poa_ci_low']:.3f}, {r_row['poa_ci_high']:.3f}]"
-            print(f"{d:<8} {r:<22} {poa_m:<12} {poa_ci:<20}")
-        print("=" * 70)
+            base_r = str(r_row["baseline_router"])
+            poa_str = f"{r_row['poa_evac_common_mean']:.3f} [{r_row['poa_evac_common_ci_low']:.3f}, {r_row['poa_evac_common_ci_high']:.3f}]"
+            gain_str = f"{r_row['gain_safe_pp_mean']:+.2f} [{r_row['gain_safe_pp_ci_low']:.2f}, {r_row['gain_safe_pp_ci_high']:.2f}]"
+            n_c = f"{r_row['n_common_safe_mean']:.0f}"
+            print(f"{d:<8} {base_r:<20} {poa_str:<26} {gain_str:<24} {n_c:<10}")
+        print("=" * 95)
 
     # Trapped edge_closed_en_route diagnosis
     print("\n" + "=" * 70)
@@ -505,7 +619,9 @@ def main() -> None:
         )
 
     # Analysis & Report
-    records = load_all_json_records(out_dir)
+    allowed_demands = set(demand_override if demand_override is not None else ([1000, 2000] if args.quick else cong_cfg.demand_levels))
+    allowed_seeds = set(seed_override if seed_override is not None else ([0, 1, 2] if args.quick else list(range(cong_cfg.n_seeds))))
+    records = load_all_json_records(out_dir, allowed_demands=allowed_demands, allowed_seeds=allowed_seeds)
     if not records:
         print("[ladder] No run records found in", out_dir / "raw")
         return
@@ -517,19 +633,24 @@ def main() -> None:
 
     # Paired differences
     comparisons = [
+        ("coordinated_online", "selfish_forecast"),
+        ("selfish_forecast", "selfish"),
+        ("selfish_forecast", "time_dependent"),
+        ("coordinated_offline", "selfish_forecast"),
         ("coordinated_online", "selfish"),
         ("coordinated_online", "time_dependent"),
         ("coordinated_online", "static"),
         ("coordinated_offline", "coordinated_online"),
         ("selfish", "time_dependent"),
     ]
-    paired_df = build_paired_diffs(records, comparisons, ci_level=cong_cfg.ci_level)
+    raw_dir = out_dir / "raw"
+    paired_df = build_paired_diffs(records, comparisons, raw_dir=raw_dir, ci_level=cong_cfg.ci_level)
     paired_path = out_dir / "paired_diffs.csv"
     paired_df.to_csv(paired_path, index=False)
     print(f"Paired differences saved to {paired_path}")
 
-    # Price of anarchy
-    poa_df = build_poa_table(records, ci_level=cong_cfg.ci_level)
+    # Price of anarchy on common-safe set
+    poa_df = build_poa_table(records, raw_dir=raw_dir, ci_level=cong_cfg.ci_level)
     poa_path = out_dir / "poa.csv"
     poa_df.to_csv(poa_path, index=False)
     print(f"Price of anarchy saved to {poa_path}")

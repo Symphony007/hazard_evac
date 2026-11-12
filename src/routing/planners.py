@@ -179,3 +179,55 @@ class SelfishRouter(Router):
             extra_delay=extra_delay_fn,
         )
 
+
+class SelfishForecastRouter(Router):
+    """Ablation router: uncoordinated selfish routing with flood forecast and live delay.
+
+    Combines live congestion snapshots with time-dependent hazard forecasting,
+    without coordination, reservations, or knowledge of other agents' plans.
+
+    Key Assumptions:
+    ----------------
+    - Live congestion snapshot: Queuing delay d(e) = traffic.extra_delay_s(u, v, k, t_now)
+      is sampled at planning time t_now and assumed to remain constant over the planned trip.
+    - Hazard forecast: Evaluates true time-dependent edge speed factors and checks closure
+      against hazard arrival time a(e) at estimated arrival t + tau + d(e).
+    - Uncoordinated: Re-routes selfishly at each replan interval (default 60s) without
+      reserving capacity or accounting for future departures.
+    """
+
+    name = "selfish_forecast"
+    replans = True
+
+    def __init__(self, replan_interval_s: float | None = 60.0) -> None:
+        self.replan_interval_s = replan_interval_s
+
+    def plan(
+        self,
+        G: "nx.MultiDiGraph",
+        hazard: "HazardModel",
+        evacuee: Evacuee,
+        t_now_s: float,
+        current_node: int,
+        exits: set[int] | Sequence[int],
+        params: RoutingParams,
+        traffic: TrafficView | None = None,
+    ) -> Route | None:
+        """Compute fastest route using time-dependent hazard forecast plus live traffic delay."""
+        extra_delay_fn = (
+            (lambda u, v, k, t: traffic.extra_delay_s(u, v, k, t_now_s))
+            if traffic is not None
+            else None
+        )
+        return earliest_arrival_search(
+            G=G,
+            hazard=hazard,
+            source=current_node,
+            t_start=t_now_s,
+            exits=exits,
+            params=params,
+            mode="time_dependent",
+            extra_delay=extra_delay_fn,
+        )
+
+
