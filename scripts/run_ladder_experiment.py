@@ -121,6 +121,7 @@ def build_summary_dataframe(
         "n_edges_over_storage",
         "n_trapped_no_route",
         "n_trapped_en_route",
+        "n_fallback_plans",
         "mean_compute_ms",
     ]
 
@@ -573,6 +574,7 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Re-run even if cached outputs exist")
     parser.add_argument("--workers", type=int, default=None, help="Number of parallel worker processes")
     parser.add_argument("--analyze-only", action="store_true", help="Skip simulation and re-generate plots/tables")
+    parser.add_argument("--rerun-routers", nargs="+", default=None, help="Re-simulate only the named routers for all runs")
     parser.add_argument("--demand-levels", type=str, default=None, help="Comma-separated demand levels override")
     parser.add_argument("--seeds", type=str, default=None, help="Comma-separated seed indices override")
     args = parser.parse_args()
@@ -604,6 +606,8 @@ def main() -> None:
         return
 
     if not args.analyze_only:
+        if args.rerun_routers:
+            print(f"[ladder] Rerunning only specified routers: {args.rerun_routers}")
         run_ladder_experiment(
             graph_cfg=graph_cfg,
             hazard_cfg=hazard_cfg,
@@ -616,6 +620,7 @@ def main() -> None:
             workers=args.workers,
             demand_override=demand_override,
             seed_override=seed_override,
+            rerun_routers=args.rerun_routers,
         )
 
     # Analysis & Report

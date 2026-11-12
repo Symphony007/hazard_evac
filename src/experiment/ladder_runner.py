@@ -130,6 +130,7 @@ def run_single_ladder(
     seed_index: int,
     G: nx.MultiDiGraph | None = None,
     force: bool = False,
+    rerun_routers: Sequence[str] | set[str] | None = None,
 ) -> dict[str, Any]:
     """Execute a single multi-agent run across all configured ladder routers."""
     raw_dir = Path(cong_cfg.output_dir) / "raw"
@@ -155,8 +156,16 @@ def run_single_ladder(
         except Exception:
             existing_agents_df = None
 
+    rerun_set = set(rerun_routers) if rerun_routers else set()
     requested_routers = list(cong_cfg.routers)
     existing_metrics = existing_record.get("metrics", {}) if existing_record is not None else {}
+
+    # If rerun_routers are specified, strip them from existing_metrics and existing_agents_df
+    if rerun_set and existing_record is not None:
+        existing_metrics = {k: v for k, v in existing_metrics.items() if k not in rerun_set}
+        if existing_agents_df is not None and "router_name" in existing_agents_df.columns:
+            existing_agents_df = existing_agents_df[~existing_agents_df["router_name"].isin(rerun_set)]
+
     missing_routers = [r for r in requested_routers if r not in existing_metrics]
 
     if not force and not missing_routers and existing_record is not None and existing_agents_df is not None:
@@ -311,6 +320,7 @@ def run_ladder_experiment(
     workers: int | None = None,
     demand_override: list[int] | None = None,
     seed_override: list[int] | None = None,
+    rerun_routers: Sequence[str] | set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Execute the solver ladder experiment across demands and seeds."""
     if workers is None:
@@ -430,6 +440,7 @@ def run_ladder_experiment(
                 seed_index=s,
                 G=G,
                 force=force,
+                rerun_routers=rerun_routers,
             )
             for d, s in tasks
         )
@@ -446,6 +457,7 @@ def run_ladder_experiment(
                 seed_index=s,
                 G=G,
                 force=force,
+                rerun_routers=rerun_routers,
             )
             for d, s in tasks
         ]

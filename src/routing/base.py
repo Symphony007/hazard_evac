@@ -62,6 +62,7 @@ class Route:
     nodes: list[int | str]
     length_m: float
     planned_arrival_s: float | None = None
+    fallback_used: bool = False
 
 
 @dataclass(frozen=True)

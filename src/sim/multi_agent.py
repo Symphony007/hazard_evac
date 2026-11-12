@@ -103,6 +103,7 @@ def simulate_population(
     agent_path_length: dict[int, float] = {a.id: 0.0 for a in agents}
     agent_queue_delay: dict[int, float] = {a.id: 0.0 for a in agents}
     agent_replans: dict[int, int] = {a.id: 0 for a in agents}
+    agent_fallback_plans: dict[int, int] = {a.id: 0 for a in agents}
     agent_compute_s: dict[int, float] = {a.id: 0.0 for a in agents}
     last_plan_time: dict[int, float] = {a.id: float("-inf") for a in agents}
 
@@ -134,6 +135,7 @@ def simulate_population(
                 compute_ms=agent_compute_s[agent_id] * 1000.0,
                 trap_time_s=None,
                 queue_delay_s=agent_queue_delay[agent_id],
+                n_fallback_plans=agent_fallback_plans[agent_id],
             )
             continue
 
@@ -166,6 +168,9 @@ def simulate_population(
             agent_compute_s[agent_id] += (time.perf_counter() - t_start)
             last_plan_time[agent_id] = t
 
+            if route is not None and getattr(route, "fallback_used", False):
+                agent_fallback_plans[agent_id] += 1
+
             if route is None or not route.edges:
                 active_agents.remove(agent_id)
                 agent_results[agent_id] = AgentResult(
@@ -182,6 +187,7 @@ def simulate_population(
                     compute_ms=agent_compute_s[agent_id] * 1000.0,
                     trap_time_s=t,
                     queue_delay_s=agent_queue_delay[agent_id],
+                    n_fallback_plans=agent_fallback_plans[agent_id],
                 )
                 continue
 
@@ -204,6 +210,7 @@ def simulate_population(
                 compute_ms=agent_compute_s[agent_id] * 1000.0,
                 trap_time_s=t,
                 queue_delay_s=agent_queue_delay[agent_id],
+                n_fallback_plans=agent_fallback_plans[agent_id],
             )
             continue
 
@@ -238,6 +245,7 @@ def simulate_population(
                 compute_ms=agent_compute_s[agent_id] * 1000.0,
                 trap_time_s=a_e,
                 queue_delay_s=agent_queue_delay[agent_id],
+                n_fallback_plans=agent_fallback_plans[agent_id],
             )
             continue
 
@@ -267,6 +275,7 @@ def simulate_population(
             compute_ms=agent_compute_s[aid] * 1000.0,
             trap_time_s=float(np.nan),
             queue_delay_s=agent_queue_delay[aid],
+            n_fallback_plans=agent_fallback_plans[aid],
         )
 
     ordered_results = [agent_results[a.id] for a in agents]

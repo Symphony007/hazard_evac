@@ -65,6 +65,7 @@ def per_agent_frame(
                 "compute_ms": float(r.compute_ms),
                 "trap_time_s": float(r.trap_time_s) if r.trap_time_s is not None else float(np.nan),
                 "queue_delay_s": float(getattr(r, "queue_delay_s", 0.0)),
+                "n_fallback_plans": int(getattr(r, "n_fallback_plans", 0)),
                 "max_congestion": float(np.nan),  # Placeholder schema for Task 5
             }
         )
@@ -188,6 +189,7 @@ def run_metrics(
 
     ceiling_val = float(ceiling_pct) if ceiling_pct is not None else float(np.nan)
     loss_val = float(ceiling_pct - pct_safe) if ceiling_pct is not None else float(np.nan)
+    mean_fallback = float(df["n_fallback_plans"].mean()) if "n_fallback_plans" in df and not df.empty else 0.0
 
     return {
         "pct_safe": pct_safe,
@@ -200,6 +202,7 @@ def run_metrics(
         "mean_compute_ms": mean_compute,
         "n_trapped_no_route": n_no_route,
         "n_trapped_en_route": n_en_route,
+        "n_fallback_plans": mean_fallback,
         "n_agents": n_agents,
         "max_congestion": max_congestion,
         "n_edges_over_storage": n_edges_over_storage,

@@ -352,3 +352,193 @@ def test_router_aware_resume_merge():
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+
+# ---------------------------------------------------------------------------
+# Test 8: Stage 2 fallback used when congested route infeasible
+# ---------------------------------------------------------------------------
+
+def test_selfish_forecast_fallback_when_congested_infeasible():
+    """Verify two-stage planning: fallback to forecast-only route with n_fallback_plans >= 1."""
+    # Topology: 0 -> 1 -> 2
+    # e1=(0,1,0): length=100, fft=10s, arrival=30s
+    # e2=(1,2,0): length=100, fft=10s, arrival=60s
+    # Agent departs at t=0.
+    # Suppose snapshot extra_delay on e1 is 25s.
+    # With snapshot delay: t=0, tau=10, d=25 -> arrival at node 1 = 35s > a(e1)=30s (INFEASIBLE!).
+    # Stage 1 search will return None.
+    # Stage 2 search sets extra_delay=0: t=0, tau=10 -> arrival 10s < 30s; e2: 10+10=20s < 60s (FEASIBLE!).
+    # So agent departs, safely arrives at exit 2, and n_fallback_plans >= 1.
+    G = nx.MultiDiGraph()
+    G.add_edge(0, 1, 0, length=100.0, free_flow_time=10.0, travel_time=10.0, flow_capacity=10.0, capacity=10)
+    G.add_edge(1, 2, 0, length=100.0, free_flow_time=10.0, travel_time=10.0, flow_capacity=10.0, capacity=10)
+
+    hazard = StubMultiAgentHazard(
+        edge_arrivals={(0, 1, 0): 30.0, (1, 2, 0): 60.0},
+        node_arrivals={0: 30.0, 1: 30.0, 2: 60.0},
+    )
+
+    class DelayTraffic:
+        def extra_delay_s(self, u: int, v: int, k: int, t: float) -> float:
+            if (u, v, k) == (0, 1, 0):
+                return 25.0
+            return 0.0
+
+    router = SelfishForecastRouter(replan_interval_s=60.0)
+    evacuee = Evacuee(id=1, origin=0, depart_time_s=0.0)
+    params = RoutingParams(vehicle_speed_scale=1.0)
+
+    # Direct plan check
+    route = router.plan(G, hazard, evacuee, 0.0, 0, {2}, params, traffic=DelayTraffic())
+    assert route is not None
+    assert getattr(route, "fallback_used", False) is True
+    assert route.nodes == [0, 1, 2]
+
+    # Full multi-agent sim check with traffic congestion
+    # Agent 1 departs at t=0. Agent 2 also starts on (0,1,0) earlier or edge is congested.
+    # To create actual queue delay in simulate_population:
+    # If edge (0,1,0) has flow_capacity=1 veh/min (headway h = 60s),
+    # an earlier agent departing at t=0 with fft=10s will exit at t=10s.
+    # A second agent departing at t=0.1s will face last_exit=10s, h=60s -> candidate exit = 70s.
+    # At t=0.1s, extra_delay on (0,1,0) is positive and makes t + tau + delay > arrival (30s).
+    G2 = nx.MultiDiGraph()
+    G2.add_edge(0, 1, 0, length=100.0, free_flow_time=10.0, travel_time=10.0, flow_capacity=2.0, capacity=10) # h = 30s
+    G2.add_edge(1, 2, 0, length=100.0, free_flow_time=10.0, travel_time=10.0, flow_capacity=2.0, capacity=10)
+
+    # Agent 0 departs at t=0. Agent 1 departs at t=1.0s.
+    # Agent 0 enters (0,1,0) at t=0, exits at t=10. Next slot at (0,1,0) is 10 + 30 = 40s.
+    # When Agent 1 plans at t=1.0s, extra_delay on (0,1,0) is max(0, 40 - (1.0 + 10)) = 29s.
+    # Total arrival at 1 would be 1 + 10 + 29 = 40s > arrival(0,1,0)=30s!
+    # So Agent 1's Stage 1 fails, but Stage 2 succeeds (1 + 10 = 11s < 30s).
+    hazard2 = StubMultiAgentHazard(
+        edge_arrivals={(0, 1, 0): 30.0, (1, 2, 0): 60.0},
+        node_arrivals={0: 30.0, 1: 30.0, 2: 60.0},
+    )
+    a0 = Evacuee(id=0, origin=0, depart_time_s=0.0)
+    a1 = Evacuee(id=1, origin=0, depart_time_s=1.0)
+
+    traffic_cfg = TrafficConfig(replan_interval_s=60.0)
+    res = simulate_population(
+        G=G2,
+        hazard=hazard2,
+        router=router,
+        agents=[a0, a1],
+        exits={2},
+        params=params,
+        traffic_cfg=traffic_cfg,
+    )
+    assert len(res.agent_results) == 2
+    ar1 = [r for r in res.agent_results if r.agent_id == 1][0]
+    assert ar1.n_fallback_plans >= 1
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Both stages infeasible -> trapped no_route
+# ---------------------------------------------------------------------------
+
+def test_selfish_forecast_both_stages_infeasible():
+    """Verify that when even the forecast-only route is closed, router returns None / no_route."""
+    G = nx.MultiDiGraph()
+    G.add_edge(0, 1, 0, length=100.0, free_flow_time=10.0, travel_time=10.0, flow_capacity=10.0, capacity=10)
+
+    # Edge closes at t=5s, but fft=10s, so agent departing at t=0 cannot clear it even without traffic
+    hazard = StubMultiAgentHazard(
+        edge_arrivals={(0, 1, 0): 5.0},
+        node_arrivals={0: 5.0, 1: 5.0},
+    )
+    router = SelfishForecastRouter(replan_interval_s=60.0)
+    evacuee = Evacuee(id=1, origin=0, depart_time_s=0.0)
+    params = RoutingParams(vehicle_speed_scale=1.0)
+
+    route = router.plan(G, hazard, evacuee, 0.0, 0, {1}, params, traffic=None)
+    assert route is None
+
+    res = simulate_population(
+        G=G,
+        hazard=hazard,
+        router=router,
+        agents=[evacuee],
+        exits={1},
+        params=params,
+        traffic_cfg=TrafficConfig(),
+    )
+    assert len(res.agent_results) == 1
+    ar = res.agent_results[0]
+    assert ar.safe is False
+    assert ar.trapped_reason == "no_route"
+
+
+# ---------------------------------------------------------------------------
+# Test 10: --rerun-routers leaves other routers byte-identical and matches scratch
+# ---------------------------------------------------------------------------
+
+def test_rerun_routers_preserves_other_routers():
+    """Verify that rerun_routers re-simulates specified router without touching others."""
+    cfg = StudyAreaConfig(name="tollygunge", center_lat=22.4989, center_lon=88.3488, dist_m=1200)
+    G = get_or_build_graph(cfg)
+    h_cfg = HazardConfig(terrain_seed=123, spread_speed_m_per_min=60.0)
+    sc_cfg = ScenarioConfig(n_evacuees=25)
+    tr_cfg = TrafficConfig(replan_interval_s=60.0)
+    co_cfg = CoordinatedConfig()
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="test_rerun_"))
+    try:
+        cg_cfg = CongestionConfig(
+            flood_speed_m_per_min=60.0,
+            demand_levels=[25],
+            n_seeds=1,
+            base_hazard_seed=3000,
+            base_scenario_seed=4000,
+            routers=["static", "time_dependent", "selfish_forecast"],
+            output_dir=str(tmp_dir),
+        )
+
+        # 1. Run all 3 routers from scratch
+        res1 = run_single_ladder(
+            graph_cfg=cfg,
+            hazard_cfg=h_cfg,
+            scenario_cfg=sc_cfg,
+            traffic_cfg=tr_cfg,
+            cong_cfg=cg_cfg,
+            coord_cfg=co_cfg,
+            demand=25,
+            seed_index=0,
+            G=G,
+            force=True,
+        )
+
+        csv_path = tmp_dir / "raw" / "agents_demand25_seed0.csv"
+        df1 = pd.read_csv(csv_path)
+        static_rows_before = df1[df1["router_name"] == "static"].copy()
+        td_rows_before = df1[df1["router_name"] == "time_dependent"].copy()
+
+        # 2. Rerun ONLY selfish_forecast
+        res2 = run_single_ladder(
+            graph_cfg=cfg,
+            hazard_cfg=h_cfg,
+            scenario_cfg=sc_cfg,
+            traffic_cfg=tr_cfg,
+            cong_cfg=cg_cfg,
+            coord_cfg=co_cfg,
+            demand=25,
+            seed_index=0,
+            G=G,
+            force=False,
+            rerun_routers=["selfish_forecast"],
+        )
+
+        df2 = pd.read_csv(csv_path)
+        static_rows_after = df2[df2["router_name"] == "static"].copy()
+        td_rows_after = df2[df2["router_name"] == "time_dependent"].copy()
+
+        # Check static and time_dependent rows are identical before and after
+        pd.testing.assert_frame_equal(static_rows_before.reset_index(drop=True), static_rows_after.reset_index(drop=True))
+        pd.testing.assert_frame_equal(td_rows_before.reset_index(drop=True), td_rows_after.reset_index(drop=True))
+
+        # Check selfish_forecast matches the original run (excluding wall-clock compute_ms)
+        sf_rows_before = df1[df1["router_name"] == "selfish_forecast"].drop(columns=["compute_ms"]).reset_index(drop=True)
+        sf_rows_after = df2[df2["router_name"] == "selfish_forecast"].drop(columns=["compute_ms"]).reset_index(drop=True)
+        pd.testing.assert_frame_equal(sf_rows_before, sf_rows_after)
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+

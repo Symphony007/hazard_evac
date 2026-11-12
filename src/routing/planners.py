@@ -213,13 +213,22 @@ class SelfishForecastRouter(Router):
         params: RoutingParams,
         traffic: TrafficView | None = None,
     ) -> Route | None:
-        """Compute fastest route using time-dependent hazard forecast plus live traffic delay."""
+        """Compute fastest route using two-stage planning: live traffic delay + flood forecast,
+
+        falling back to forecast-only if congested routes are infeasible.
+
+        Stage 1: plan with snapshot traffic queue delay in both cost and usability test.
+        Stage 2 (fallback): if stage 1 returns None, plan again with snapshot delay set to 0.
+        Assumption: agents always attempt the best forecast-feasible route rather than giving
+        up when snapshot congestion deems all paths temporarily closed.
+        """
         extra_delay_fn = (
             (lambda u, v, k, t: traffic.extra_delay_s(u, v, k, t_now_s))
             if traffic is not None
             else None
         )
-        return earliest_arrival_search(
+        # Stage 1: congestion-delayed earliest-arrival search
+        route = earliest_arrival_search(
             G=G,
             hazard=hazard,
             source=current_node,
@@ -229,5 +238,26 @@ class SelfishForecastRouter(Router):
             mode="time_dependent",
             extra_delay=extra_delay_fn,
         )
+        if route is not None:
+            route.fallback_used = False
+            return route
+
+        # Stage 2: fallback to forecast-only if stage 1 found no feasible route
+        if extra_delay_fn is not None:
+            fallback_route = earliest_arrival_search(
+                G=G,
+                hazard=hazard,
+                source=current_node,
+                t_start=t_now_s,
+                exits=exits,
+                params=params,
+                mode="time_dependent",
+                extra_delay=None,
+            )
+            if fallback_route is not None:
+                fallback_route.fallback_used = True
+                return fallback_route
+
+        return None
 
 
