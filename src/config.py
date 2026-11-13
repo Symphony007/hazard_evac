@@ -114,6 +114,7 @@ class CoordinatedConfig:
     planning_mode: str = "online"
     flood_safety_margin_s: float = 0.0
     replan_interval_s: float | None = None
+    fallback_on_infeasible: bool = True
 
 
 @dataclass

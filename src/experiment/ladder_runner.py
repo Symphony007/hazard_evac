@@ -81,6 +81,7 @@ def instantiate_router(
             flood_safety_margin_s=coord_cfg.flood_safety_margin_s,
             replans=bool(coord_cfg.replan_interval_s is not None),
             replan_interval_s=coord_cfg.replan_interval_s,
+            fallback_on_infeasible=coord_cfg.fallback_on_infeasible,
         )
     elif name == "coordinated_offline":
         return CoordinatedRouter(
@@ -88,6 +89,7 @@ def instantiate_router(
             flood_safety_margin_s=coord_cfg.flood_safety_margin_s,
             replans=bool(coord_cfg.replan_interval_s is not None),
             replan_interval_s=coord_cfg.replan_interval_s,
+            fallback_on_infeasible=coord_cfg.fallback_on_infeasible,
         )
     else:
         raise ValueError(f"Unknown router name: {name}")

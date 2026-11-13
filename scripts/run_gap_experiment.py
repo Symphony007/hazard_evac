@@ -79,6 +79,7 @@ def run_single_gap_instance(
     G: nx.MultiDiGraph | None = None,
     force: bool = False,
     task6_raw_dir: Path | None = None,
+    rerun_routers: Sequence[str] | set[str] | None = None,
 ) -> dict[str, Any]:
     """Execute evaluation for one (demand, seed_index) instance."""
     raw_dir = Path(gap_cfg.output_dir) / "raw"
@@ -89,12 +90,117 @@ def run_single_gap_instance(
     csv_path = raw_dir / f"agents_{token}.csv"
 
     if not force and json_path.exists() and csv_path.exists():
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                record = json.load(f)
-            return record
-        except Exception:
-            pass
+        if rerun_routers:
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    record = json.load(f)
+                existing_df = pd.read_csv(csv_path)
+
+                if G is None:
+                    G = get_or_build_graph(graph_cfg)
+                params = make_routing_params(scenario_cfg)
+
+                hazard_seed = gap_cfg.base_hazard_seed + seed_index
+                scenario_seed = gap_cfg.base_scenario_seed + seed_index
+
+                h_cfg = replace(
+                    hazard_cfg,
+                    spread_speed_m_per_min=float(gap_cfg.flood_speed_m_per_min),
+                    seed=int(hazard_seed),
+                    terrain_seed=int(hazard_cfg.terrain_seed),
+                )
+                hazard = FloodHazard(G, h_cfg)
+
+                exits, _ = build_exits(
+                    G=G,
+                    hazard=hazard,
+                    scenario_cfg=scenario_cfg,
+                    center_lat=graph_cfg.center_lat,
+                    center_lon=graph_cfg.center_lon,
+                    horizon_min=h_cfg.horizon_min,
+                )
+
+                max_demand = max(gap_cfg.demand_levels)
+                rng = np.random.default_rng(scenario_seed)
+                full_sample = generate_agents(
+                    G=G,
+                    hazard=hazard,
+                    exits=exits,
+                    scenario_cfg=replace(scenario_cfg, n_evacuees=max_demand),
+                    rng=rng,
+                )
+                agents = full_sample[:demand]
+                n_agents = len(agents)
+
+                # Re-simulate ONLY the named heuristics
+                new_agent_records: list[dict[str, Any]] = []
+                for h_name in rerun_routers:
+                    router = instantiate_router(h_name, traffic_cfg, coord_cfg)
+                    pop_res = simulate_population(
+                        G=G,
+                        hazard=hazard,
+                        router=router,
+                        agents=agents,
+                        exits=exits,
+                        params=params,
+                        traffic_cfg=traffic_cfg,
+                    )
+                    safe_count = sum(1 for r in pop_res.agent_results if r.safe)
+                    pct_safe = float(100.0 * safe_count / n_agents) if n_agents > 0 else 0.0
+                    record.setdefault("heuristic_metrics", {})[h_name] = {
+                        "n_safe": safe_count,
+                        "pct_safe": pct_safe,
+                        "reused_task6": False,
+                    }
+                    for r in pop_res.agent_results:
+                        new_agent_records.append({
+                            "agent_id": r.agent_id,
+                            "router_name": h_name,
+                            "origin": r.path_nodes[0] if r.path_nodes else "",
+                            "safe": r.safe,
+                            "trapped_reason": r.trapped_reason,
+                            "depart_time_s": r.depart_time_s,
+                            "finish_time_s": r.finish_time_s,
+                            "evac_time_s": r.evac_time_s,
+                            "path_length_m": r.path_length_m,
+                            "demand": demand,
+                            "seed_index": seed_index,
+                        })
+
+                # Merge into existing DataFrame preserving order
+                non_rerun_df = existing_df[~existing_df["router_name"].isin(rerun_routers)]
+                new_df = pd.DataFrame(new_agent_records)
+                merged_df = pd.concat([non_rerun_df, new_df], ignore_index=True)
+
+                router_order = {name: i for i, name in enumerate(list(gap_cfg.heuristics) + ["exact_plan"])}
+                merged_df["_sort_key"] = merged_df["router_name"].map(lambda x: router_order.get(x, 999))
+                merged_df = merged_df.sort_values(by=["_sort_key", "agent_id"]).drop(columns=["_sort_key"]).reset_index(drop=True)
+
+                # Update horizon warnings
+                horizon_warnings: list[str] = []
+                horizon_s = exact_cfg.horizon_s
+                for _, rec in merged_df.iterrows():
+                    ft = rec.get("finish_time_s")
+                    if pd.notna(ft) and float(ft) > horizon_s:
+                        horizon_warnings.append(
+                            f"Agent {int(rec['agent_id'])} ({rec['router_name']}) finished at {float(ft):.1f}s > horizon {horizon_s}s"
+                        )
+                record["horizon_warnings"] = horizon_warnings
+
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(_json_serializable(record), f, indent=2)
+
+                merged_df.to_csv(csv_path, index=False)
+                return record
+            except Exception:
+                pass
+        else:
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    record = json.load(f)
+                return record
+            except Exception:
+                pass
 
     if G is None:
         G = get_or_build_graph(graph_cfg)
@@ -152,7 +258,8 @@ def run_single_gap_instance(
     # 5. Evaluate heuristics
     for h_name in gap_cfg.heuristics:
         reused = False
-        if cached_task6_df is not None and "router_name" in cached_task6_df.columns:
+        skip_task6 = bool(rerun_routers and h_name in rerun_routers)
+        if not skip_task6 and cached_task6_df is not None and "router_name" in cached_task6_df.columns:
             h_df = cached_task6_df[cached_task6_df["router_name"] == h_name]
             if len(h_df) == n_agents:
                 reused = True
@@ -821,6 +928,12 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Force recomputation.")
     parser.add_argument("--workers", type=int, default=None, help="Worker count override.")
     parser.add_argument("--analyze-only", action="store_true", help="Skip runs; analyze existing raw outputs.")
+    parser.add_argument(
+        "--rerun-routers",
+        nargs="+",
+        default=None,
+        help="Re-simulate ONLY the named heuristics, merging into raw records.",
+    )
     args = parser.parse_args()
 
     # Load configs
@@ -879,6 +992,7 @@ def main() -> None:
                     seed_index=s,
                     force=args.force,
                     task6_raw_dir=task6_raw_dir,
+                    rerun_routers=args.rerun_routers,
                 )
                 for d, s in tasks
             )
@@ -898,6 +1012,7 @@ def main() -> None:
                     G=G,
                     force=args.force,
                     task6_raw_dir=task6_raw_dir,
+                    rerun_routers=args.rerun_routers,
                 )
 
     # Aggregation & Figures

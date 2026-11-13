@@ -147,7 +147,7 @@ def test_flood_and_no_feasible_route():
 
     # Edge A-D (1->2) floods at 45.0s
     hazard = StubMultiAgentHazard(edge_arrivals={(1, 2, 0): 45.0})
-    router = CoordinatedRouter(planning_mode="online")
+    router = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=False)
     agents = [Evacuee(id=i, origin=0, depart_time_s=0.0) for i in range(1, 6)]
     params = RoutingParams(vehicle_speed_scale=1.0, sf_floor=0.05)
 
@@ -292,4 +292,283 @@ def test_search_does_not_mutate_table():
     # Verify table remains identical
     assert table.get_reservations((0, 1, 0)) == snapshot_01
     assert table.get_reservations((1, 2, 0)) == snapshot_12
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Fallback on infeasible toy (Test 1 from Task 6d spec)
+# ---------------------------------------------------------------------------
+
+def test_fallback_when_reservation_slots_clear_after_flood():
+    """Toy where reservation slots clear after flood but free-flow is feasible.
+
+    With fallback_on_infeasible=True -> route returned with fallback_used=True.
+    With fallback_on_infeasible=False -> returns None (no_route).
+    """
+    G = nx.MultiDiGraph()
+    G.add_node(0, y=0.0, x=0.0)
+    G.add_node(1, y=0.0, x=1.0)
+    G.add_node(2, y=0.0, x=2.0)
+    G.add_edge(0, 1, key=0, free_flow_time=10.0, flow_capacity=6.0, length=100.0, capacity=10)
+    G.add_edge(1, 2, key=0, free_flow_time=10.0, flow_capacity=6.0, length=100.0, capacity=10)
+
+    # Edge (1, 2) floods at 35.0s
+    hazard = StubMultiAgentHazard(edge_arrivals={(1, 2, 0): 35.0})
+    params = RoutingParams(vehicle_speed_scale=1.0, sf_floor=0.05)
+
+    agents = [
+        Evacuee(id=1, origin=0, depart_time_s=0.0),
+        Evacuee(id=2, origin=0, depart_time_s=0.0),
+        Evacuee(id=3, origin=0, depart_time_s=0.0),
+    ]
+
+    # Mode 1: fallback_on_infeasible=False -> agent 3 receives no_route
+    r_no_fb = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=False)
+    pop_no_fb = simulate_population(G, hazard, r_no_fb, agents, exits={2}, params=params)
+    assert pop_no_fb.agent_results[0].safe is True
+    assert pop_no_fb.agent_results[1].safe is True
+    assert pop_no_fb.agent_results[2].safe is False
+    assert pop_no_fb.agent_results[2].trapped_reason == "no_route"
+    assert pop_no_fb.agent_results[2].n_fallback_plans == 0
+
+    # Mode 2: fallback_on_infeasible=True -> agent 3 gets fallback route with fallback_used=True
+    r_fb = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=True)
+    pop_fb = simulate_population(G, hazard, r_fb, agents, exits={2}, params=params)
+    assert pop_fb.agent_results[0].safe is True
+    assert pop_fb.agent_results[1].safe is True
+    assert pop_fb.agent_results[2].n_fallback_plans == 1
+
+    # Check plan directly on fresh router
+    router_check = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=True)
+    router_check.prepare(G, hazard, agents, exits={2}, params=params)
+    rt1 = router_check.plan(G, hazard, agents[0], 0.0, 0, {2}, params)
+    assert rt1 is not None and getattr(rt1, "fallback_used", False) is False
+    rt2 = router_check.plan(G, hazard, agents[1], 0.0, 0, {2}, params)
+    assert rt2 is not None and getattr(rt2, "fallback_used", False) is False
+    rt3 = router_check.plan(G, hazard, agents[2], 0.0, 0, {2}, params)
+    assert rt3 is not None
+    assert rt3.fallback_used is True
+
+    # Same check for offline mode:
+    r_off_no_fb = CoordinatedRouter(planning_mode="offline", fallback_on_infeasible=False)
+    r_off_no_fb.prepare(G, hazard, agents, exits={2}, params=params)
+    assert r_off_no_fb.plan(G, hazard, agents[2], 0.0, 0, {2}, params) is None
+
+    r_off_fb = CoordinatedRouter(planning_mode="offline", fallback_on_infeasible=True)
+    r_off_fb.prepare(G, hazard, agents, exits={2}, params=params)
+    rt3_off = r_off_fb.plan(G, hazard, agents[2], 0.0, 0, {2}, params)
+    assert rt3_off is not None
+    assert rt3_off.fallback_used is True
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Infinite capacity regression matches time_dependent (Test 2)
+# ---------------------------------------------------------------------------
+
+def test_infinite_capacity_regression_with_fallback_matches_time_dependent():
+    """Verify infinite capacity results with fallback_on_infeasible=True match time_dependent."""
+    G = nx.MultiDiGraph()
+    G.add_node(0, y=0.0, x=0.0)
+    G.add_node(1, y=0.0, x=1.0)
+    G.add_node(2, y=0.0, x=2.0)
+    G.add_edge(0, 1, key=0, free_flow_time=10.0, flow_capacity=100000.0, length=100.0, capacity=1000)
+    G.add_edge(1, 2, key=0, free_flow_time=10.0, flow_capacity=100000.0, length=100.0, capacity=1000)
+
+    hazard = StubMultiAgentHazard()
+    agents = [Evacuee(id=i, origin=0, depart_time_s=float(i * 5)) for i in range(10)]
+    params = RoutingParams(vehicle_speed_scale=1.0, sf_floor=0.05)
+
+    td_pop = simulate_population(G, hazard, TimeDependentRouter(), agents, exits={2}, params=params)
+    coord_on = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=True)
+    coord_on_pop = simulate_population(G, hazard, coord_on, agents, exits={2}, params=params)
+    coord_off = CoordinatedRouter(planning_mode="offline", fallback_on_infeasible=True)
+    coord_off_pop = simulate_population(G, hazard, coord_off, agents, exits={2}, params=params)
+
+    for r_td, r_on, r_off in zip(td_pop.agent_results, coord_on_pop.agent_results, coord_off_pop.agent_results):
+        assert r_on.safe == r_td.safe
+        assert r_off.safe == r_td.safe
+        assert r_on.evac_time_s == pytest.approx(r_td.evac_time_s, abs=1e-3)
+        assert r_off.evac_time_s == pytest.approx(r_td.evac_time_s, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Test 10: fallback_on_infeasible=False gives bit-identical legacy results (Test 3)
+# ---------------------------------------------------------------------------
+
+def test_fallback_on_infeasible_false_legacy_bit_identical():
+    """Verify fallback_on_infeasible=False produces exact legacy behaviour on Toy 2."""
+    G = nx.MultiDiGraph()
+    G.add_node(0, y=0.0, x=0.0)
+    G.add_node(1, y=0.0, x=1.0)
+    G.add_node(2, y=0.0, x=2.0)
+    G.add_edge(0, 1, key=0, free_flow_time=10.0, flow_capacity=6.0, length=100.0, capacity=10)
+    G.add_edge(1, 2, key=0, free_flow_time=10.0, flow_capacity=6.0, length=100.0, capacity=10)
+
+    hazard = StubMultiAgentHazard(edge_arrivals={(1, 2, 0): 45.0})
+    agents = [Evacuee(id=i, origin=0, depart_time_s=0.0) for i in range(1, 6)]
+    params = RoutingParams(vehicle_speed_scale=1.0, sf_floor=0.05)
+
+    router = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=False)
+    pop_res = simulate_population(G, hazard, router, agents, exits={2}, params=params)
+
+    for i in range(3):
+        assert pop_res.agent_results[i].safe is True
+        assert pop_res.agent_results[i].finish_time_s == pytest.approx((i + 2) * 10.0)
+        assert pop_res.agent_results[i].n_fallback_plans == 0
+
+    assert pop_res.agent_results[3].safe is False
+    assert pop_res.agent_results[3].trapped_reason == "no_route"
+    assert pop_res.agent_results[3].n_fallback_plans == 0
+
+    assert pop_res.agent_results[4].safe is False
+    assert pop_res.agent_results[4].trapped_reason == "no_route"
+    assert pop_res.agent_results[4].n_fallback_plans == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 11: After fallback plan, reservation table contains committed slots (Test 4)
+# ---------------------------------------------------------------------------
+
+def test_fallback_commits_slots_and_determinism_holds():
+    """Verify slots are committed via earliest_exit on fallback and determinism holds."""
+    G = nx.MultiDiGraph()
+    G.add_node(0, y=0.0, x=0.0)
+    G.add_node(1, y=0.0, x=1.0)
+    G.add_node(2, y=0.0, x=2.0)
+    G.add_edge(0, 1, key=0, free_flow_time=10.0, flow_capacity=6.0, length=100.0, capacity=10)
+    G.add_edge(1, 2, key=0, free_flow_time=10.0, flow_capacity=6.0, length=100.0, capacity=10)
+
+    hazard = StubMultiAgentHazard(edge_arrivals={(1, 2, 0): 35.0})
+    agents = [
+        Evacuee(id=1, origin=0, depart_time_s=0.0),
+        Evacuee(id=2, origin=0, depart_time_s=0.0),
+        Evacuee(id=3, origin=0, depart_time_s=0.0),
+    ]
+    params = RoutingParams(vehicle_speed_scale=1.0, sf_floor=0.05)
+
+    router1 = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=True)
+    pop1 = simulate_population(G, hazard, router1, agents, exits={2}, params=params)
+
+    # Check that router1 table has reservations for all 3 agents
+    res_01 = router1.table.get_reservations((0, 1, 0))
+    res_12 = router1.table.get_reservations((1, 2, 0))
+    assert len(res_01) == 3
+    assert len(res_12) == 3
+    assert 30.0 in res_01
+    assert 40.0 in res_12
+
+    # Determinism: run second time
+    router2 = CoordinatedRouter(planning_mode="online", fallback_on_infeasible=True)
+    pop2 = simulate_population(G, hazard, router2, agents, exits={2}, params=params)
+
+    times1 = [r.finish_time_s for r in pop1.agent_results]
+    times2 = [r.finish_time_s for r in pop2.agent_results]
+    assert times1 == times2
+    fb1 = [r.n_fallback_plans for r in pop1.agent_results]
+    fb2 = [r.n_fallback_plans for r in pop2.agent_results]
+    assert fb1 == fb2
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Gap script --rerun-routers on tiny config preserves other results (Test 5)
+# ---------------------------------------------------------------------------
+
+def test_gap_runner_rerun_routers_preserves_other_results(tmp_path):
+    """Verify run_single_gap_instance with rerun_routers leaves exact and other routers unchanged."""
+    import pandas as pd
+    from scripts.run_gap_experiment import run_single_gap_instance
+    from src.config import ExactConfig, GapConfig, HazardConfig, ScenarioConfig, StudyAreaConfig, TrafficConfig, CoordinatedConfig
+
+    # Toy study area graph
+    G = nx.MultiDiGraph()
+    G.graph["crs"] = "EPSG:4326"
+    for nid in range(3):
+        G.add_node(nid, x=float(nid) * 0.001, y=0.0)
+    G.add_edge(0, 1, key=0, length=100.0, free_flow_time=10.0, flow_capacity=60.0, lanes_n=1, speed_kph=36.0, capacity=10)
+    G.add_edge(1, 2, key=0, length=100.0, free_flow_time=10.0, flow_capacity=60.0, lanes_n=1, speed_kph=36.0, capacity=10)
+
+    graph_cfg = StudyAreaConfig(name="toy", center_lat=0.0, center_lon=0.0, dist_m=500)
+    hazard_cfg = HazardConfig(spread_speed_m_per_min=60.0, horizon_min=30.0, n_sources=1, min_source_separation_m=10.0)
+    scenario_cfg = ScenarioConfig(
+        n_evacuees=2,
+        vehicle_speed_scale=1.0,
+        sf_floor=0.05,
+        n_exits=1,
+        exit_min_dist_from_center_m=50.0,
+        exit_mode="legacy_latest",
+    )
+    traffic_cfg = TrafficConfig(replan_interval_s=60.0)
+    coord_cfg = CoordinatedConfig(fallback_on_infeasible=True)
+    exact_cfg = ExactConfig(dt_s=10, horizon_s=300)
+    gap_cfg = GapConfig(
+        output_dir=str(tmp_path / "gap_test"),
+        demand_levels=[2],
+        n_seeds=1,
+        heuristics=["selfish", "coordinated_online"],
+    )
+
+    # First run without rerun_routers
+    rec1 = run_single_gap_instance(
+        graph_cfg=graph_cfg,
+        hazard_cfg=hazard_cfg,
+        scenario_cfg=scenario_cfg,
+        traffic_cfg=traffic_cfg,
+        coord_cfg=coord_cfg,
+        exact_cfg=exact_cfg,
+        gap_cfg=gap_cfg,
+        demand=2,
+        seed_index=0,
+        G=G,
+        force=True,
+    )
+
+    csv_path = tmp_path / "gap_test" / "raw" / "agents_demand2_seed0.csv"
+    df1 = pd.read_csv(csv_path)
+
+    exact_keys = [
+        "n_safe_ceil_model", "pct_safe_ceil_model",
+        "n_safe_floor_model", "pct_safe_floor_model",
+        "ub_n", "ub_pct", "exact_plan_realized_n",
+        "build_time_ceil_s", "solve_time_ceil_s",
+        "n_nodes_ceil", "n_arcs_ceil",
+    ]
+    snapshot_exact = {k: rec1[k] for k in exact_keys if k in rec1}
+    snapshot_selfish = df1[df1["router_name"] == "selfish"].to_dict(orient="records")
+    snapshot_exact_plan = df1[df1["router_name"] == "exact_plan"].to_dict(orient="records")
+
+    # Second run with rerun_routers=["coordinated_online"]
+    rec2 = run_single_gap_instance(
+        graph_cfg=graph_cfg,
+        hazard_cfg=hazard_cfg,
+        scenario_cfg=scenario_cfg,
+        traffic_cfg=traffic_cfg,
+        coord_cfg=coord_cfg,
+        exact_cfg=exact_cfg,
+        gap_cfg=gap_cfg,
+        demand=2,
+        seed_index=0,
+        G=G,
+        force=False,
+        rerun_routers=["coordinated_online"],
+    )
+
+    df2 = pd.read_csv(csv_path)
+
+    # 1. Exact model results untouched
+    for k, v in snapshot_exact.items():
+        assert rec2[k] == v, f"Exact result {k} changed from {v} to {rec2[k]}"
+
+    # 2. Selfish router results in CSV byte-identical
+    sub_selfish1 = df1[df1["router_name"] == "selfish"].reset_index(drop=True)
+    sub_selfish2 = df2[df2["router_name"] == "selfish"].reset_index(drop=True)
+    assert sub_selfish1.equals(sub_selfish2)
+
+    # 3. Exact plan replay in CSV byte-identical
+    sub_ep1 = df1[df1["router_name"] == "exact_plan"].reset_index(drop=True)
+    sub_ep2 = df2[df2["router_name"] == "exact_plan"].reset_index(drop=True)
+    assert sub_ep1.equals(sub_ep2)
+
+    # 4. Coordinated_online present in updated df2
+    coord_after = df2[df2["router_name"] == "coordinated_online"]
+    assert len(coord_after) == 2
+
 

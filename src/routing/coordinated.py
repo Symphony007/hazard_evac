@@ -50,6 +50,7 @@ class CoordinatedRouter(Router):
         flood_safety_margin_s: float = 0.0,
         replans: bool = False,
         replan_interval_s: float | None = None,
+        fallback_on_infeasible: bool = True,
     ) -> None:
         """Initialize the coordinated router.
 
@@ -65,12 +66,15 @@ class CoordinatedRouter(Router):
             Whether periodic or dynamic replanning is enabled (default: False).
         replan_interval_s : float or None
             Periodic replan interval in seconds (default: None).
+        fallback_on_infeasible : bool
+            Whether to fall back to forecast-only search if reservation search fails (default: True).
         """
         self.planning_mode: Literal["online", "offline"] = planning_mode
         self.name = name if name is not None else f"coordinated_{planning_mode}"
         self.flood_safety_margin_s = float(flood_safety_margin_s)
         self.replans = bool(replans)
         self.replan_interval_s = float(replan_interval_s) if replan_interval_s is not None else None
+        self.fallback_on_infeasible = bool(fallback_on_infeasible)
 
         self.table: ReservationTable | None = None
         self._routes: dict[int, Route | None] = {}
@@ -120,10 +124,18 @@ class CoordinatedRouter(Router):
         exits: set[int] | Sequence[int],
         params: RoutingParams,
     ) -> Route | None:
-        """Find earliest-arrival route in reservation mode and commit slots."""
+        """Find earliest-arrival route in reservation mode and commit slots.
+
+        Implements two-stage planning:
+        Stage 1: reservation-aware earliest-arrival search.
+        Stage 2 (fallback): if stage 1 returns None and fallback_on_infeasible is True,
+        plan with forecast-only time-dependent search, commit chosen slots, and set
+        route.fallback_used = True.
+        """
         if self.table is None:
             self.table = ReservationTable(G)
 
+        # Stage 1: reservation-aware earliest-arrival search
         route = earliest_arrival_search(
             G=G,
             hazard=hazard,
@@ -135,6 +147,25 @@ class CoordinatedRouter(Router):
             table=self.table,
             flood_safety_margin_s=self.flood_safety_margin_s,
         )
+
+        if route is not None:
+            route.fallback_used = False
+        elif self.fallback_on_infeasible:
+            # Stage 2: fallback to forecast-only time-dependent search (no reservations)
+            fallback_route = earliest_arrival_search(
+                G=G,
+                hazard=hazard,
+                source=current_node,
+                t_start=t_now_s,
+                exits=exits,
+                params=params,
+                mode="time_dependent",
+                extra_delay=None,
+                flood_safety_margin_s=self.flood_safety_margin_s,
+            )
+            if fallback_route is not None:
+                fallback_route.fallback_used = True
+                route = fallback_route
 
         if route is None:
             return None
