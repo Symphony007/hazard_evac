@@ -1,0 +1,9 @@
+sumo_dir: sumo
+step_length_s: 1.0
+time_to_teleport: -1
+vehicle_length: 5.0
+min_gap: 3.3
+accel: 2.6
+decel: 4.5
+sigma: 0.0
+tau: 2.7969

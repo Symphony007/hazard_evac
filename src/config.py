@@ -167,6 +167,22 @@ class GapConfig:
     ci_level: float = 0.95
 
 
+@dataclass
+class SumoConfig:
+    """Configuration for SUMO microscopic traffic simulation."""
+
+    sumo_dir: str = "sumo"
+    step_length_s: float = 1.0
+    time_to_teleport: int = -1
+    vehicle_length: float = 5.0
+    min_gap: float = 3.3
+    accel: float = 2.6
+    decel: float = 4.5
+    sigma: float = 0.0
+    tau: float = 3.12
+
+
+
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):
     """Load a YAML config file into a dataclass.
 

@@ -1,6 +1,9 @@
 # Cached data
 data/
 
+# SUMO network and outputs
+/sumo/
+
 # Output plots and results
 outputs/
 
