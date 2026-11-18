@@ -106,6 +106,8 @@ def simulate_population(
     agent_fallback_plans: dict[int, int] = {a.id: 0 for a in agents}
     agent_compute_s: dict[int, float] = {a.id: 0.0 for a in agents}
     last_plan_time: dict[int, float] = {a.id: float("-inf") for a in agents}
+    # route_edges: traversed edges so far + remaining plan edges (for SUMO open-loop replay)
+    agent_traversed_edges: dict[int, list[tuple]] = {a.id: [] for a in agents}
 
     agent_results: dict[int, AgentResult] = {}
     active_agents: set[int] = {a.id for a in agents}
@@ -136,6 +138,7 @@ def simulate_population(
                 trap_time_s=None,
                 queue_delay_s=agent_queue_delay[agent_id],
                 n_fallback_plans=agent_fallback_plans[agent_id],
+                route_edges=list(agent_traversed_edges[agent_id]),
             )
             continue
 
@@ -188,6 +191,7 @@ def simulate_population(
                     trap_time_s=t,
                     queue_delay_s=agent_queue_delay[agent_id],
                     n_fallback_plans=agent_fallback_plans[agent_id],
+                    route_edges=[],  # no_route: empty
                 )
                 continue
 
@@ -211,6 +215,7 @@ def simulate_population(
                 trap_time_s=t,
                 queue_delay_s=agent_queue_delay[agent_id],
                 n_fallback_plans=agent_fallback_plans[agent_id],
+                route_edges=list(agent_traversed_edges[agent_id]),
             )
             continue
 
@@ -231,6 +236,8 @@ def simulate_population(
             active_agents.remove(agent_id)
             agent_path_nodes[agent_id].append(v_next)
             agent_path_length[agent_id] += float(edge_data.get("length", 0.0))
+            # route_edges: traversed so far + this trapping edge + remaining plan
+            full_route = list(agent_traversed_edges[agent_id]) + [edge] + list(agent_plan.get(agent_id, []))
             agent_results[agent_id] = AgentResult(
                 agent_id=agent_id,
                 router_name=router.name,
@@ -246,6 +253,7 @@ def simulate_population(
                 trap_time_s=a_e,
                 queue_delay_s=agent_queue_delay[agent_id],
                 n_fallback_plans=agent_fallback_plans[agent_id],
+                route_edges=full_route,
             )
             continue
 
@@ -255,6 +263,7 @@ def simulate_population(
         agent_queue_delay[agent_id] += queue_wait
         agent_path_nodes[agent_id].append(v_next)
         agent_path_length[agent_id] += float(edge_data.get("length", 0.0))
+        agent_traversed_edges[agent_id].append(edge)
 
         heapq.heappush(pq, (actual_exit, agent_id, v_next))
 
@@ -276,6 +285,7 @@ def simulate_population(
             trap_time_s=float(np.nan),
             queue_delay_s=agent_queue_delay[aid],
             n_fallback_plans=agent_fallback_plans[aid],
+            route_edges=list(agent_traversed_edges[aid]) + list(agent_plan.get(aid, [])),
         )
 
     ordered_results = [agent_results[a.id] for a in agents]

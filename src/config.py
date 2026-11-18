@@ -180,7 +180,35 @@ class SumoConfig:
     decel: float = 4.5
     sigma: float = 0.0
     tau: float = 3.12
+    # speed_multiplier: global edge-speed multiplier applied on top of vehicle_speed_scale.
+    # Iterated by calibrate_sumo_speed.py so that SUMO free-flow travel times match the
+    # point-queue baseline (target ratio 1.0 ± 5%).  Default 1.0 = no extra scaling.
+    speed_multiplier: float = 1.0
 
+
+
+@dataclass
+class SumoExperimentConfig:
+    """Configuration for the SUMO validation experiment (Task 8b)."""
+
+    routers: list[str] = field(
+        default_factory=lambda: [
+            "static",
+            "time_dependent",
+            "selfish",
+            "selfish_forecast",
+            "coordinated_online",
+        ]
+    )
+    demand_levels: list[int] = field(default_factory=lambda: [1000, 2000])
+    n_seeds: int = 3
+    base_hazard_seed: int = 3000
+    base_scenario_seed: int = 4000
+    flood_speed_m_per_min: float = 60.0
+    workers: int = 3
+    output_dir: str = "outputs/task8"
+    ci_level: float = 0.95
+    horizon_s: int = 3600
 
 
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):

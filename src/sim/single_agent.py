@@ -49,6 +49,13 @@ class AgentResult:
         Number of replanning events triggered en-route.
     compute_ms : float
         Total CPU time spent in router.plan() for this agent, in milliseconds.
+    route_edges : list[tuple]
+        Full edge sequence (u, v, k) the agent was planned to traverse.
+        For safe agents: all edges traversed.
+        For trapped agents: traversed edges plus remaining edges of the last plan
+        (so the route is complete for SUMO open-loop replay).
+        Empty for no_route agents.
+        Stored separately (e.g. pickle); NOT written to raw CSVs.
     """
 
     agent_id: int
@@ -65,6 +72,11 @@ class AgentResult:
     trap_time_s: float | None = None
     queue_delay_s: float = 0.0
     n_fallback_plans: int = 0
+    route_edges: list[tuple] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.route_edges is None:
+            self.route_edges = []
 
 
 def simulate_agent(

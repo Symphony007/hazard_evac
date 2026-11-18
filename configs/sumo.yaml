@@ -6,4 +6,5 @@ min_gap: 3.3
 accel: 2.6
 decel: 4.5
 sigma: 0.0
-tau: 2.7969
+tau: 3.1875
+speed_multiplier: 1.202291
