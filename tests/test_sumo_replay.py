@@ -426,3 +426,89 @@ def test_speed_matching_converges_mock():
     )
     assert call_count[0] == len(history), "Call count should match iteration count"
 
+
+# ---------------------------------------------------------------------------
+# Test 5: No stderr noise during replay (no TraCI command errors)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.sumo
+@requires_sumo
+def test_replay_no_stderr_noise(tmp_path: Path, capfd):
+    """Verify that replaying toy nets (with and without flood) writes zero errors to stderr."""
+    G = _make_line_graph(n_nodes=3, length=200.0, speed_ms=10.0)
+    res = export_network_to_sumo(G=G, output_dir=tmp_path / "net", vehicle_speed_scale=1.0, run_netconvert=True)
+    net_path = res["net_path"]
+    edge_map_g2s = res["edge_map"]["graph_to_sumo"]
+    edge_map_s2g = res["edge_map"]["sumo_to_graph"]
+
+    vtype_path = tmp_path / "vtype.add.xml"
+    vtype_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<additional>\n'
+        '    <vType id="calib_vtype" length="5.0" minGap="3.3" '
+        'accel="2.6" decel="4.5" sigma="0.0" tau="2.7969"/>\n'
+        '</additional>\n',
+        encoding="utf-8",
+    )
+
+    # 1. 5-vehicle toy replay (no flood)
+    agents_5 = [Evacuee(id=i, origin=0, depart_time_s=float(i * 2)) for i in range(5)]
+    agents_with_routes_5 = [(a, [(0, 1, 0), (1, 2, 0)]) for a in agents_5]
+    flood_times_inf = {sid: float("inf") for sid in edge_map_s2g.keys()}
+
+    # Clear any prior stderr from setup
+    capfd.readouterr()
+
+    outcomes_5 = replay_routes(
+        net_path=net_path,
+        vtype_path=vtype_path,
+        agents_with_routes=agents_with_routes_5,
+        edge_map_g2s=edge_map_g2s,
+        flood_times_by_sumo_edge=flood_times_inf,
+        step_length_s=1.0,
+        time_to_teleport=-1,
+        horizon_s=300,
+        work_dir=tmp_path / "work_5",
+        sumo_label="test_no_err_5",
+    )
+    assert len(outcomes_5) == 5
+
+    # 2. Flood toy replay (2 vehicles trapped)
+    bc_edge_sumo = edge_to_sumo_id(1, 2, 0)
+    flood_times = {sid: float("inf") for sid in edge_map_s2g.keys()}
+    flood_times[bc_edge_sumo] = 60.0
+
+    agents_flood = [
+        Evacuee(id=10, origin=0, depart_time_s=0.0),
+        Evacuee(id=11, origin=1, depart_time_s=50.0),
+        Evacuee(id=12, origin=1, depart_time_s=80.0),
+    ]
+    agents_with_routes_flood = [
+        (agents_flood[0], [(0, 1, 0), (1, 2, 0)]),
+        (agents_flood[1], [(1, 2, 0)]),
+        (agents_flood[2], [(1, 2, 0)]),
+    ]
+
+    outcomes_flood = replay_routes(
+        net_path=net_path,
+        vtype_path=vtype_path,
+        agents_with_routes=agents_with_routes_flood,
+        edge_map_g2s=edge_map_g2s,
+        flood_times_by_sumo_edge=flood_times,
+        step_length_s=1.0,
+        time_to_teleport=-1,
+        horizon_s=300,
+        work_dir=tmp_path / "work_flood",
+        sumo_label="test_no_err_flood",
+    )
+    assert len(outcomes_flood) == 3
+
+    # Check stderr
+    captured = capfd.readouterr()
+    err = captured.err
+    assert "Error:" not in err, f"TraCI/SUMO wrote error to stderr: {err}"
+    assert "Answered with error" not in err, f"TraCI/SUMO answered with error: {err}"
+    assert "is not known" not in err, f"TraCI queried unknown vehicle: {err}"
+    assert err.strip() == "", f"Expected clean stderr, got: {err}"
+
+

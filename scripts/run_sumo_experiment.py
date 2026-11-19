@@ -297,6 +297,55 @@ def run_pq_and_replay(
            and sumo_arrived[aid].planned_depart_s is not None
     ]
 
+    # --- Outcome accounting (Requirement 3) ---
+    n_arrived = len(sumo_arrived)
+    n_trapped = len(sumo_trapped)
+    n_unfinished = len(sumo_unfinished)
+    n_never_inserted = len(sumo_never_inserted)
+    n_at_exit = len(at_exit_agents)
+    n_no_route = len(no_route_agents)
+    n_vehicles_not_created = n_at_exit + n_no_route
+    total_accounted = (
+        n_arrived
+        + n_trapped
+        + n_unfinished
+        + n_never_inserted
+        + n_vehicles_not_created
+    )
+    assert total_accounted == len(agents), (
+        f"Outcome accounting failed for {router_name} (demand={demand}, seed={seed_index}): "
+        f"arrived={n_arrived} + trapped={n_trapped} + unfinished={n_unfinished} + "
+        f"never_inserted={n_never_inserted} + vehicles_not_created={n_vehicles_not_created} "
+        f"(at_exit={n_at_exit}, no_route={n_no_route}) == {total_accounted} != {len(agents)}"
+    )
+    print(
+        f"  [accounting] {router_name} d={demand} s={seed_index}: "
+        f"arrived={n_arrived} + trapped={n_trapped} + unfinished={n_unfinished} + "
+        f"never_inserted={n_never_inserted} + not_created={n_vehicles_not_created} "
+        f"(at_exit={n_at_exit}, no_route={n_no_route}) == {total_accounted} == n_agents ({len(agents)})"
+    )
+
+    # --- Agreement sets and statistics (Requirement 4) ---
+    sumo_safe_set = set(sumo_arrived.keys()) | at_exit_agents
+    pq_safe_set = set(pq_safe_results.keys())
+    all_agent_ids = {a.id for a in agents}
+
+    both_safe_ids = pq_safe_set & sumo_safe_set
+    only_pq_ids = pq_safe_set - sumo_safe_set
+    only_sumo_ids = sumo_safe_set - pq_safe_set
+    neither_ids = all_agent_ids - (pq_safe_set | sumo_safe_set)
+
+    agent_edge_len = {r.agent_id: len(r.route_edges) for r in pq_res.agent_results}
+
+    both_departs = [agents_map[aid].depart_time_s for aid in both_safe_ids]
+    both_edges = [agent_edge_len[aid] for aid in both_safe_ids]
+
+    only_pq_departs = [agents_map[aid].depart_time_s for aid in only_pq_ids]
+    only_pq_edges = [agent_edge_len[aid] for aid in only_pq_ids]
+
+    only_sumo_departs = [agents_map[aid].depart_time_s for aid in only_sumo_ids]
+    only_sumo_edges = [agent_edge_len[aid] for aid in only_sumo_ids]
+
     record: dict[str, Any] = {
         "demand": demand,
         "seed_index": seed_index,
@@ -314,7 +363,9 @@ def run_pq_and_replay(
         "pq_mean_evac_s": _safe_mean([r.evac_time_s for r in pq_safe_results.values()]),
         "pq_p90_evac_s": _safe_p90([r.evac_time_s for r in pq_safe_results.values()]),
         "sumo_mean_evac_common_s": _safe_mean(sumo_evac_common),
+        "sumo_p90_evac_common_s": _safe_p90(sumo_evac_common),
         "pq_mean_evac_common_s": _safe_mean(pq_evac_common),
+        "pq_p90_evac_common_s": _safe_p90(pq_evac_common),
         "sumo_mean_waiting_s": _safe_mean(sumo_waiting_times),
         "sumo_mean_time_loss_s": _safe_mean(sumo_time_losses),
         "sumo_mean_depart_delay_s": _safe_mean(sumo_depart_delays),
@@ -324,6 +375,16 @@ def run_pq_and_replay(
         "pq_mismatch_warning": pq_mismatch_warning,
         "n_never_inserted": len(sumo_never_inserted),
         "n_common_safe": len(common_ids),
+        "agree_both_safe": len(both_safe_ids),
+        "agree_only_pq_safe": len(only_pq_ids),
+        "agree_only_sumo_safe": len(only_sumo_ids),
+        "agree_neither_safe": len(neither_ids),
+        "agree_both_mean_depart_s": _safe_mean(both_departs),
+        "agree_both_mean_route_edges": _safe_mean(both_edges),
+        "agree_only_pq_mean_depart_s": _safe_mean(only_pq_departs),
+        "agree_only_pq_mean_route_edges": _safe_mean(only_pq_edges),
+        "agree_only_sumo_mean_depart_s": _safe_mean(only_sumo_departs),
+        "agree_only_sumo_mean_route_edges": _safe_mean(only_sumo_edges),
     }
 
     result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,23 +419,104 @@ def aggregate_results(
                 "pq_safe_pct", "sumo_safe_pct", "sumo_trapped_pct",
                 "sumo_unfinished_pct", "sumo_never_inserted_pct",
                 "sumo_mean_evac_s", "sumo_p90_evac_s",
-                "pq_mean_evac_s",
-                "sumo_mean_evac_common_s", "pq_mean_evac_common_s",
+                "pq_mean_evac_s", "pq_p90_evac_s",
+                "sumo_mean_evac_common_s", "sumo_p90_evac_common_s",
+                "pq_mean_evac_common_s", "pq_p90_evac_common_s",
                 "sumo_mean_waiting_s", "sumo_mean_time_loss_s",
                 "sumo_mean_depart_delay_s",
                 "n_waiting_gt60s",
+                "agree_both_safe", "agree_only_pq_safe",
+                "agree_only_sumo_safe", "agree_neither_safe",
+                "agree_both_mean_depart_s", "agree_both_mean_route_edges",
+                "agree_only_pq_mean_depart_s", "agree_only_pq_mean_route_edges",
+                "agree_only_sumo_mean_depart_s", "agree_only_sumo_mean_route_edges",
             ]:
                 if col in sub.columns:
                     vals = sub[col].dropna().tolist()
                     m, hw = _ci95(vals)
                     row[f"{col}_mean"] = m
                     row[f"{col}_ci95"] = hw
+            if "sumo_safe_pct_mean" in row and "pq_safe_pct_mean" in row:
+                row["safe_diff_pct_mean"] = row["sumo_safe_pct_mean"] - row["pq_safe_pct_mean"]
             summary_rows.append(row)
     summary_df = pd.DataFrame(summary_rows)
     summary_df.to_csv(out_dir / "summary.csv", index=False)
     print(f"\n[SUMO experiment] Summary CSV -> {out_dir / 'summary.csv'}")
-    print(summary_df[["demand", "router_name", "pq_safe_pct_mean", "sumo_safe_pct_mean",
-                        "sumo_mean_waiting_s_mean", "sumo_mean_time_loss_s_mean"]].to_string(index=False))
+
+    # --- Printed Summary Table (Requirement 5) ---
+    print("\n" + "=" * 135)
+    print("SUMO VALIDATION EXPERIMENT: PERFORMANCE SUMMARY (MEAN OVER SEEDS)")
+    print("=" * 135)
+    summary_cols = [
+        "demand", "router_name",
+        "pq_safe_pct_mean", "sumo_safe_pct_mean",
+        "sumo_trapped_pct_mean", "sumo_unfinished_pct_mean", "sumo_never_inserted_pct_mean",
+        "sumo_mean_evac_common_s_mean", "sumo_p90_evac_common_s_mean",
+        "pq_mean_evac_common_s_mean", "pq_p90_evac_common_s_mean",
+        "sumo_mean_waiting_s_mean", "sumo_mean_time_loss_s_mean",
+        "sumo_mean_depart_delay_s_mean", "n_waiting_gt60s_mean",
+    ]
+    valid_cols = [c for c in summary_cols if c in summary_df.columns]
+    rename_map = {
+        "demand": "Demand",
+        "router_name": "Router",
+        "pq_safe_pct_mean": "PQ Safe%",
+        "sumo_safe_pct_mean": "SUMO Safe%",
+        "sumo_trapped_pct_mean": "Trapped%",
+        "sumo_unfinished_pct_mean": "Unfin%",
+        "sumo_never_inserted_pct_mean": "NeverIns%",
+        "sumo_mean_evac_common_s_mean": "SUMO Evac(s)",
+        "sumo_p90_evac_common_s_mean": "SUMO p90(s)",
+        "pq_mean_evac_common_s_mean": "PQ Evac(s)",
+        "pq_p90_evac_common_s_mean": "PQ p90(s)",
+        "sumo_mean_waiting_s_mean": "Wait(s)",
+        "sumo_mean_time_loss_s_mean": "Loss(s)",
+        "sumo_mean_depart_delay_s_mean": "DepDelay(s)",
+        "n_waiting_gt60s_mean": "Wait>60s",
+    }
+    disp_df = summary_df[valid_cols].rename(columns=rename_map)
+    print(disp_df.to_string(index=False))
+
+    # --- Survival Differences (sumo_safe_pct - pq_safe_pct) ---
+    print("\n" + "=" * 80)
+    print("SURVIVAL DIFFERENCE PER ROUTER (SUMO - PQ in percentage points)")
+    print("=" * 80)
+    for demand in demand_levels:
+        sub = summary_df[summary_df["demand"] == demand]
+        for _, r in sub.iterrows():
+            diff = r["sumo_safe_pct_mean"] - r["pq_safe_pct_mean"]
+            print(f"  Demand {int(demand):4d} | {r['router_name']:<20}: {diff:+.2f} pp "
+                  f"(SUMO {r['sumo_safe_pct_mean']:.1f}% vs PQ {r['pq_safe_pct_mean']:.1f}%)")
+
+    # --- Agreement Table (Requirement 4) ---
+    print("\n" + "=" * 135)
+    print("AGREEMENT TABLE: POINT-QUEUE VS SUMO SURVIVAL & ROUTE ATTRIBUTES")
+    print("=" * 135)
+    agree_cols = [
+        "demand", "router_name",
+        "agree_both_safe_mean", "agree_only_pq_safe_mean",
+        "agree_only_sumo_safe_mean", "agree_neither_safe_mean",
+        "agree_both_mean_depart_s_mean", "agree_both_mean_route_edges_mean",
+        "agree_only_pq_mean_depart_s_mean", "agree_only_pq_mean_route_edges_mean",
+        "agree_only_sumo_mean_depart_s_mean", "agree_only_sumo_mean_route_edges_mean",
+    ]
+    valid_agree_cols = [c for c in agree_cols if c in summary_df.columns]
+    rename_agree_map = {
+        "demand": "Demand",
+        "router_name": "Router",
+        "agree_both_safe_mean": "Both Safe",
+        "agree_only_pq_safe_mean": "Only PQ",
+        "agree_only_sumo_safe_mean": "Only SUMO",
+        "agree_neither_safe_mean": "Neither",
+        "agree_both_mean_depart_s_mean": "Both Dep(s)",
+        "agree_both_mean_route_edges_mean": "Both Edges",
+        "agree_only_pq_mean_depart_s_mean": "PQ-only Dep(s)",
+        "agree_only_pq_mean_route_edges_mean": "PQ-only Edges",
+        "agree_only_sumo_mean_depart_s_mean": "SUMO-only Dep(s)",
+        "agree_only_sumo_mean_route_edges_mean": "SUMO-only Edges",
+    }
+    disp_agree = summary_df[valid_agree_cols].rename(columns=rename_agree_map)
+    print(disp_agree.to_string(index=False))
 
     # Paired differences
     paired_rows = []

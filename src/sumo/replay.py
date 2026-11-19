@@ -346,10 +346,19 @@ def replay_routes(
                     to_remove.append(vid)
 
             for vid in to_remove:
+                if vid not in sub_results:
+                    continue
                 # Read road id before removal (already in sub_results)
                 road_id = sub_results[vid].get(tc.VAR_ROAD_ID, "")
                 trapped_ids.add(vid)
-                conn.vehicle.remove(vid)
+                try:
+                    conn.vehicle.unsubscribe(vid)
+                except Exception:
+                    pass
+                try:
+                    conn.vehicle.remove(vid)
+                except Exception:
+                    pass
                 aid = int(vid.replace("veh_", ""))
                 outcomes[aid] = VehicleOutcome(
                     agent_id=aid,
