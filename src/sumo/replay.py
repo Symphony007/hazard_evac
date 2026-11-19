@@ -41,6 +41,7 @@ import traci
 import traci.constants as tc
 
 from src.sumo.network import edge_to_sumo_id, find_sumo_binary
+from src.sumo.routes import SanitizerStats, sanitize_agent_routes
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +58,11 @@ class VehicleOutcome:
     TRAPPED       - Removed because its current edge flooded at time `trap_time`.
     UNFINISHED    - Still in network at horizon (gridlock or too slow).
     NEVER_INSERTED - SUMO never inserted the vehicle (departure capacity issue).
+    ROUTE_DROPPED  - Route had unrepairable disconnections or empty after reversal removal.
     """
 
     agent_id: int
-    status: str            # "ARRIVED" | "TRAPPED" | "UNFINISHED" | "NEVER_INSERTED"
+    status: str            # "ARRIVED" | "TRAPPED" | "UNFINISHED" | "NEVER_INSERTED" | "ROUTE_DROPPED"
 
     # --- ARRIVED fields (from tripinfo) ---
     duration_s: float | None = None        # total trip duration from actual departure
@@ -78,13 +80,19 @@ class VehicleOutcome:
     actual_arrival_s: float | None = None  # time vehicle reached exit (ARRIVED only)
 
 
+class ReplayResults(dict):
+    """Dictionary mapping agent_id -> VehicleOutcome with attached sanitizer stats."""
+
+    sanitizer_stats: SanitizerStats | None = None
+
+
 # ---------------------------------------------------------------------------
 # Route file writer (open-loop, one vehicle per agent with route)
 # ---------------------------------------------------------------------------
 
 def write_replay_routes(
     rou_path: str | Path,
-    agents_with_routes: list[tuple[Any, list[tuple]]],  # (Evacuee, route_edges)
+    agents_with_routes: list[tuple[Any, list[Any]]],  # (Evacuee, route_edges)
     edge_map_g2s: dict[str, str],
     vtype_id: str = "calib_vtype",
 ) -> list[int]:
@@ -121,10 +129,15 @@ def write_replay_routes(
                 continue
 
             sumo_edge_ids: list[str] = []
-            for u, v, k in route_edges:
-                seid = edge_map_g2s.get(f"{u},{v},{k}")
-                if seid is not None:
-                    sumo_edge_ids.append(seid)
+            for item in route_edges:
+                if isinstance(item, str):
+                    sumo_edge_ids.append(item)
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    u, v = item[0], item[1]
+                    k = item[2] if len(item) >= 3 else 0
+                    seid = edge_map_g2s.get(f"{u},{v},{k}")
+                    if seid is not None:
+                        sumo_edge_ids.append(seid)
 
             # Deduplicate consecutive repeated edges (can happen at replan boundaries)
             deduped: list[str] = []
@@ -262,10 +275,20 @@ def replay_routes(
         rou_path = work_dir_path / f"{sumo_label}_routes.rou.xml"
         tripinfo_path = work_dir_path / f"{sumo_label}_tripinfo.xml"
 
-        # Write route file
+        # Sanitize routes before writing to SUMO routes XML
+        sanitized_pairs, dropped_aids, sanitizer_stats = sanitize_agent_routes(
+            net_path=net_path,
+            agents_with_routes=agents_with_routes,
+            edge_map_g2s=edge_map_g2s,
+        )
+
+        outcomes = ReplayResults()
+        outcomes.sanitizer_stats = sanitizer_stats
+
+        # Write route file for sanitized agents
         written_ids = write_replay_routes(
             rou_path=rou_path,
-            agents_with_routes=agents_with_routes,
+            agents_with_routes=sanitized_pairs,
             edge_map_g2s=edge_map_g2s,
             vtype_id=vtype_id,
         )
@@ -277,11 +300,18 @@ def replay_routes(
             for a, _ in agents_with_routes
         }
 
-        # Mark agents with no SUMO route as NEVER_INSERTED upfront
-        outcomes: dict[int, VehicleOutcome] = {}
+        # Mark agents whose route was dropped by the sanitizer
+        for aid in dropped_aids:
+            outcomes[aid] = VehicleOutcome(
+                agent_id=aid,
+                status="ROUTE_DROPPED",
+                planned_depart_s=planned_depart.get(aid),
+            )
+
+        # Mark any other agents not written (e.g. empty routes) as NEVER_INSERTED
         for agent, _ in agents_with_routes:
             aid = int(agent.id)
-            if aid not in written_set:
+            if aid not in written_set and aid not in outcomes:
                 outcomes[aid] = VehicleOutcome(
                     agent_id=aid,
                     status="NEVER_INSERTED",

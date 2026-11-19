@@ -23,11 +23,15 @@ import json
 import math
 import pickle
 import shutil
+import subprocess
 import sys
 import time
+import traceback
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import traci
 
 import matplotlib
 matplotlib.use("Agg")
@@ -105,7 +109,7 @@ def _safe_p90(vals: list[float]) -> float:
 # Single (demand, seed, router) run
 # ---------------------------------------------------------------------------
 
-def run_pq_and_replay(
+def _run_pq_and_replay_impl(
     demand: int,
     seed_index: int,
     router_name: str,
@@ -254,12 +258,14 @@ def run_pq_and_replay(
         sumo_label=label,
     )
     sumo_wall = time.perf_counter() - t1
+    sanitizer_stats = getattr(outcomes, "sanitizer_stats", None)
 
     # --- Compute SUMO metrics ---
     sumo_arrived = {aid: oc for aid, oc in outcomes.items() if oc.status == "ARRIVED"}
     sumo_trapped = {aid: oc for aid, oc in outcomes.items() if oc.status == "TRAPPED"}
     sumo_unfinished = {aid: oc for aid, oc in outcomes.items() if oc.status == "UNFINISHED"}
     sumo_never_inserted = {aid: oc for aid, oc in outcomes.items() if oc.status == "NEVER_INSERTED"}
+    sumo_route_dropped = {aid: oc for aid, oc in outcomes.items() if oc.status == "ROUTE_DROPPED"}
 
     # Agents already at exit at departure count as safe in SUMO too
     total_sumo_safe = len(sumo_arrived) + len(at_exit_agents)
@@ -267,6 +273,7 @@ def run_pq_and_replay(
     sumo_trapped_pct = 100.0 * len(sumo_trapped) / len(agents) if agents else 0.0
     sumo_unfinished_pct = 100.0 * len(sumo_unfinished) / len(agents) if agents else 0.0
     sumo_never_inserted_pct = 100.0 * len(sumo_never_inserted) / len(agents) if agents else 0.0
+    sumo_route_dropped_pct = 100.0 * len(sumo_route_dropped) / len(agents) if agents else 0.0
 
     # Travel times (evac = arrival - planned_depart)
     sumo_evac_times = []
@@ -297,11 +304,12 @@ def run_pq_and_replay(
            and sumo_arrived[aid].planned_depart_s is not None
     ]
 
-    # --- Outcome accounting (Requirement 3) ---
+    # --- Outcome accounting (Requirement 3 + route_dropped) ---
     n_arrived = len(sumo_arrived)
     n_trapped = len(sumo_trapped)
     n_unfinished = len(sumo_unfinished)
     n_never_inserted = len(sumo_never_inserted)
+    n_route_dropped = len(sumo_route_dropped)
     n_at_exit = len(at_exit_agents)
     n_no_route = len(no_route_agents)
     n_vehicles_not_created = n_at_exit + n_no_route
@@ -310,18 +318,20 @@ def run_pq_and_replay(
         + n_trapped
         + n_unfinished
         + n_never_inserted
+        + n_route_dropped
         + n_vehicles_not_created
     )
     assert total_accounted == len(agents), (
         f"Outcome accounting failed for {router_name} (demand={demand}, seed={seed_index}): "
         f"arrived={n_arrived} + trapped={n_trapped} + unfinished={n_unfinished} + "
-        f"never_inserted={n_never_inserted} + vehicles_not_created={n_vehicles_not_created} "
+        f"never_inserted={n_never_inserted} + route_dropped={n_route_dropped} + "
+        f"vehicles_not_created={n_vehicles_not_created} "
         f"(at_exit={n_at_exit}, no_route={n_no_route}) == {total_accounted} != {len(agents)}"
     )
     print(
         f"  [accounting] {router_name} d={demand} s={seed_index}: "
         f"arrived={n_arrived} + trapped={n_trapped} + unfinished={n_unfinished} + "
-        f"never_inserted={n_never_inserted} + not_created={n_vehicles_not_created} "
+        f"never_inserted={n_never_inserted} + route_dropped={n_route_dropped} + not_created={n_vehicles_not_created} "
         f"(at_exit={n_at_exit}, no_route={n_no_route}) == {total_accounted} == n_agents ({len(agents)})"
     )
 
@@ -358,6 +368,11 @@ def run_pq_and_replay(
         "sumo_trapped_pct": sumo_trapped_pct,
         "sumo_unfinished_pct": sumo_unfinished_pct,
         "sumo_never_inserted_pct": sumo_never_inserted_pct,
+        "sumo_route_dropped_pct": sumo_route_dropped_pct,
+        "n_uturn_pairs_removed": sanitizer_stats.n_uturn_pairs_removed if sanitizer_stats else 0,
+        "n_repaired": sanitizer_stats.n_repaired if sanitizer_stats else 0,
+        "n_route_dropped": n_route_dropped,
+        "n_agents_affected": sanitizer_stats.n_agents_affected if sanitizer_stats else 0,
         "sumo_mean_evac_s": _safe_mean(sumo_evac_times),
         "sumo_p90_evac_s": _safe_p90(sumo_evac_times),
         "pq_mean_evac_s": _safe_mean([r.evac_time_s for r in pq_safe_results.values()]),
@@ -394,6 +409,80 @@ def run_pq_and_replay(
     return record
 
 
+def run_pq_and_replay(
+    demand: int,
+    seed_index: int,
+    router_name: str,
+    graph_cfg: StudyAreaConfig,
+    hazard_cfg: HazardConfig,
+    scenario_cfg: ScenarioConfig,
+    traffic_cfg: TrafficConfig,
+    coord_cfg: CoordinatedConfig,
+    sumo_cfg: SumoConfig,
+    exp_cfg: SumoExperimentConfig,
+    G,
+    out_dir: Path,
+    routes_dir: Path,
+    sumo_dir: Path,
+    net_path: Path,
+    vtype_path: Path,
+    edge_map_g2s: dict[str, str],
+    edge_map_s2g: dict[str, list],
+    force: bool = False,
+    task6_raw_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Wrap _run_pq_and_replay_impl with try...except for task robustness."""
+    token = f"demand{demand}_seed{seed_index}_{router_name}"
+    result_path = out_dir / "raw" / f"result_{token}.json"
+
+    if not force and result_path.exists():
+        try:
+            with open(result_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    try:
+        return _run_pq_and_replay_impl(
+            demand=demand,
+            seed_index=seed_index,
+            router_name=router_name,
+            graph_cfg=graph_cfg,
+            hazard_cfg=hazard_cfg,
+            scenario_cfg=scenario_cfg,
+            traffic_cfg=traffic_cfg,
+            coord_cfg=coord_cfg,
+            sumo_cfg=sumo_cfg,
+            exp_cfg=exp_cfg,
+            G=G,
+            out_dir=out_dir,
+            routes_dir=routes_dir,
+            sumo_dir=sumo_dir,
+            net_path=net_path,
+            vtype_path=vtype_path,
+            edge_map_g2s=edge_map_g2s,
+            edge_map_s2g=edge_map_s2g,
+            force=force,
+            task6_raw_dir=task6_raw_dir,
+        )
+    except (traci.exceptions.FatalTraCIError, subprocess.SubprocessError, Exception) as exc:
+        print(f"ERROR: Task {token} failed: {exc}")
+        traceback.print_exc()
+        if result_path.exists():
+            try:
+                result_path.unlink()
+            except OSError:
+                pass
+        return {
+            "task": token,
+            "status": "FAILED",
+            "error": str(exc),
+            "demand": demand,
+            "seed_index": seed_index,
+            "router_name": router_name,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Aggregation and reporting
 # ---------------------------------------------------------------------------
@@ -418,6 +507,8 @@ def aggregate_results(
             for col in [
                 "pq_safe_pct", "sumo_safe_pct", "sumo_trapped_pct",
                 "sumo_unfinished_pct", "sumo_never_inserted_pct",
+                "sumo_route_dropped_pct",
+                "n_uturn_pairs_removed", "n_repaired", "n_route_dropped", "n_agents_affected",
                 "sumo_mean_evac_s", "sumo_p90_evac_s",
                 "pq_mean_evac_s", "pq_p90_evac_s",
                 "sumo_mean_evac_common_s", "sumo_p90_evac_common_s",
@@ -552,7 +643,8 @@ def aggregate_results(
     paired_df = pd.DataFrame(paired_rows)
     paired_df.to_csv(out_dir / "paired_diffs.csv", index=False)
     print(f"\n[SUMO experiment] Paired diffs -> {out_dir / 'paired_diffs.csv'}")
-    print(paired_df[paired_df["metric"] == "sumo_safe_pct"].to_string(index=False))
+    if not paired_df.empty and "metric" in paired_df.columns:
+        print(paired_df[paired_df["metric"] == "sumo_safe_pct"].to_string(index=False))
 
     # Router ranking comparison
     print("\n[SUMO experiment] Router ranking by pct_safe:")
@@ -664,6 +756,12 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--analyze-only", action="store_true", help="Aggregate existing results only")
     parser.add_argument("--unmatched", action="store_true", help="Use net_unmatched.net.xml")
+    parser.add_argument(
+        "--only",
+        nargs=3,
+        metavar=("DEMAND", "SEED", "ROUTER"),
+        help="Run a single task e.g. --only 1500 1 selfish",
+    )
     args = parser.parse_args()
 
     graph_cfg = load_config(PROJECT_ROOT / args.graph_config, StudyAreaConfig)
@@ -717,14 +815,27 @@ def main() -> None:
     routes_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "raw").mkdir(parents=True, exist_ok=True)
 
+    # Count existing finished tasks
+    existing_raw = list((out_dir / "raw").glob("result_demand*_seed*_*.json"))
+    print(f"Skipped {len(existing_raw)} finished tasks at start")
+
     G = get_or_build_graph(graph_cfg)
 
     # Task6 raw for sanity check
     task6_raw = PROJECT_ROOT / "outputs" / "task6" / "raw"
     task6_raw_dir = task6_raw if task6_raw.exists() else None
 
+    # --- Single task run via --only ---
+    if args.only:
+        demand = int(args.only[0])
+        seed_idx = int(args.only[1])
+        router = str(args.only[2])
+        demand_levels = [demand]
+        seed_indices = [seed_idx]
+        routers = [router]
+        print(f"[SUMO experiment] SINGLE TASK: demand={demand}, seed={seed_idx}, router={router}")
     # --- Quick run ---
-    if args.quick:
+    elif args.quick:
         demand_levels = [1000]
         seed_indices = [0]
         routers = exp_cfg.routers
@@ -809,17 +920,28 @@ def main() -> None:
             print(f"  [{d}, s{s}, {r}] PQ={rec['pq_safe_pct']:.1f}% SUMO={rec['sumo_safe_pct']:.1f}%")
 
     elapsed = time.perf_counter() - t_start
-    print(f"[SUMO experiment] Completed {len(results)} runs in {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    successful_results = [r for r in results if r and r.get("status") != "FAILED"]
+    failed_tasks = [r for r in results if r and r.get("status") == "FAILED"]
+    print(
+        f"[SUMO experiment] Completed {len(successful_results)} successful runs "
+        f"({len(failed_tasks)} failed) in {elapsed:.1f}s ({elapsed/60:.1f} min)"
+    )
+
+    if failed_tasks:
+        print(f"\n[FAILED TASKS] The following {len(failed_tasks)} tasks failed:")
+        for ft in failed_tasks:
+            print(f"  - {ft.get('task', 'unknown')}: {ft.get('error', 'unknown error')}")
 
     # Warn about never-inserted or mismatches
-    for rec in results:
+    for rec in successful_results:
         if rec.get("n_never_inserted", 0) > 0:
             print(f"  WARNING: {rec['n_never_inserted']} never-inserted vehicles in "
                   f"demand={rec['demand']} seed={rec['seed_index']} router={rec['router_name']}")
         if rec.get("pq_mismatch_warning"):
             print(f"  {rec['pq_mismatch_warning']}")
 
-    aggregate_results(results, out_dir, routers, demand_levels)
+    if successful_results:
+        aggregate_results(successful_results, out_dir, routers, demand_levels)
 
 
 if __name__ == "__main__":

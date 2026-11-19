@@ -1,6 +1,6 @@
 routers: [static, time_dependent, selfish, selfish_forecast, coordinated_online]
-demand_levels: [1000, 2000]
-n_seeds: 3
+demand_levels: [1000, 1500, 2000]
+n_seeds: 5
 base_hazard_seed: 3000
 base_scenario_seed: 4000
 flood_speed_m_per_min: 60
