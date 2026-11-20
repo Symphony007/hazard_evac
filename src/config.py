@@ -209,6 +209,7 @@ class SumoExperimentConfig:
     output_dir: str = "outputs/task8"
     ci_level: float = 0.95
     horizon_s: int = 3600
+    dispatch_all: bool = False
 
 
 def load_config(path: str | Path, config_cls: type = StudyAreaConfig):

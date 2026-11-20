@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 import traceback
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -61,10 +61,23 @@ from src.scenario import build_exits, generate_agents
 from src.sim.multi_agent import simulate_population
 from src.sumo.network import find_sumo_binary
 from src.sumo.replay import VehicleOutcome, build_flood_time_map, replay_routes
+from src.sumo.routes import (
+    SanitizerStats,
+    SumoNetCache,
+    compute_sumo_fallback_routes,
+    sanitize_agent_routes,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+@dataclass
+class _PQAgentResult:
+    agent_id: int
+    safe: bool
+    evac_time_s: float | None
+    route_edges: list
 
 def _json_safe(obj: Any) -> Any:
     if isinstance(obj, dict):
@@ -138,6 +151,7 @@ def _run_pq_and_replay_impl(
     token = f"demand{demand}_seed{seed_index}_{router_name}"
     result_path = out_dir / "raw" / f"result_{token}.json"
     routes_pkl = routes_dir / f"routes_{token}.pkl"
+    base_routes_pkl = PROJECT_ROOT / "outputs" / "task8" / "routes" / f"routes_{token}.pkl"
 
     if not force and result_path.exists():
         try:
@@ -180,33 +194,61 @@ def _run_pq_and_replay_impl(
 
     params = make_routing_params(scenario_cfg)
 
-    # --- Point-queue simulation (with route recording) ---
+    # --- Point-queue simulation (or reuse stored route pickle and Task 6 raw) ---
     t0 = time.perf_counter()
-    router = instantiate_router(router_name, traffic_cfg, coord_cfg)
-    pq_res = simulate_population(
-        G=G,
-        hazard=hazard,
-        router=router,
-        agents=agents,
-        exits=exits,
-        params=params,
-        traffic_cfg=traffic_cfg,
-    )
+    source_routes_pkl = routes_pkl if routes_pkl.exists() else (base_routes_pkl if base_routes_pkl.exists() else None)
+    ladder_path = task6_raw_dir / f"agents_demand{demand}_seed{seed_index}.csv" if task6_raw_dir else None
+
+    loaded_from_cache = False
+    routes_data: dict[int, list] = {}
+    pq_agent_results: list[Any] = []
+
+    if source_routes_pkl is not None and ladder_path is not None and ladder_path.exists() and not force:
+        try:
+            with open(source_routes_pkl, "rb") as f:
+                routes_data = pickle.load(f)
+            ladder_df = pd.read_csv(ladder_path)
+            sub = ladder_df[ladder_df["router_name"] == router_name]
+            if len(sub) == len(agents):
+                for _, row in sub.iterrows():
+                    aid = int(row["agent_id"])
+                    safe = bool(row["safe"])
+                    evac = float(row["evac_time_s"]) if pd.notna(row["evac_time_s"]) else None
+                    edges = routes_data.get(aid, [])
+                    pq_agent_results.append(_PQAgentResult(aid, safe, evac, edges))
+                loaded_from_cache = True
+        except Exception:
+            loaded_from_cache = False
+
+    if not loaded_from_cache:
+        router = instantiate_router(router_name, traffic_cfg, coord_cfg)
+        pq_res = simulate_population(
+            G=G,
+            hazard=hazard,
+            router=router,
+            agents=agents,
+            exits=exits,
+            params=params,
+            traffic_cfg=traffic_cfg,
+        )
+        pq_agent_results = pq_res.agent_results
+        routes_data = {r.agent_id: r.route_edges for r in pq_res.agent_results}
+
     pq_wall = time.perf_counter() - t0
 
-    pq_safe_results = {r.agent_id: r for r in pq_res.agent_results if r.safe}
+    pq_safe_results = {r.agent_id: r for r in pq_agent_results if r.safe}
     pq_safe_count = len(pq_safe_results)
     pq_safe_pct = 100.0 * pq_safe_count / len(agents) if agents else 0.0
 
-    # --- Save routes pickle ---
-    routes_data = {r.agent_id: r.route_edges for r in pq_res.agent_results}
-    routes_pkl.parent.mkdir(parents=True, exist_ok=True)
-    with open(routes_pkl, "wb") as f:
-        pickle.dump(routes_data, f)
+    # --- Save routes pickle in current routes_dir if missing ---
+    if not routes_pkl.exists():
+        routes_pkl.parent.mkdir(parents=True, exist_ok=True)
+        with open(routes_pkl, "wb") as f:
+            pickle.dump(routes_data, f)
 
     # --- Check vs ladder task6 raw (optional) ---
     pq_mismatch_warning = None
-    if task6_raw_dir is not None:
+    if task6_raw_dir is not None and not loaded_from_cache:
         ladder_path = task6_raw_dir / f"agents_demand{demand}_seed{seed_index}.csv"
         if ladder_path.exists():
             try:
@@ -234,14 +276,32 @@ def _run_pq_and_replay_impl(
     no_route_agents = set()
 
     agents_map = {a.id: a for a in agents}
-    for r in pq_res.agent_results:
+    for r in pq_agent_results:
         if r.route_edges:
             agents_with_routes.append((agents_map[r.agent_id], r.route_edges))
-        elif r.agent_id in exits_set:
+        elif agents_map[r.agent_id].origin in exits_set or r.agent_id in exits_set:
             # Agent started at exit
             at_exit_agents.add(r.agent_id)
         else:
             no_route_agents.add(r.agent_id)
+
+    # --- Fallback routing for infeasible agents (Task 8c dispatch_all) ---
+    fallback_agent_ids = set()
+    if getattr(exp_cfg, "dispatch_all", False) and no_route_agents:
+        no_route_evacuees = [agents_map[aid] for aid in sorted(no_route_agents)]
+        fallback_routes = compute_sumo_fallback_routes(
+            net_path=net_path,
+            agents=no_route_evacuees,
+            exits=exits,
+            edge_map_g2s=edge_map_g2s,
+            G=G,
+        )
+        for aid, f_route in fallback_routes.items():
+            agents_with_routes.append((agents_map[aid], f_route))
+            fallback_agent_ids.add(aid)
+            no_route_agents.remove(aid)
+
+    n_fallback_dispatched = len(fallback_agent_ids)
 
     t1 = time.perf_counter()
     # Unique label per run to allow parallel TraCI connections
@@ -266,6 +326,14 @@ def _run_pq_and_replay_impl(
     sumo_unfinished = {aid: oc for aid, oc in outcomes.items() if oc.status == "UNFINISHED"}
     sumo_never_inserted = {aid: oc for aid, oc in outcomes.items() if oc.status == "NEVER_INSERTED"}
     sumo_route_dropped = {aid: oc for aid, oc in outcomes.items() if oc.status == "ROUTE_DROPPED"}
+
+    # Fallback outcomes
+    n_fallback_arrived = sum(1 for aid in fallback_agent_ids if outcomes.get(aid) and outcomes[aid].status == "ARRIVED")
+    n_fallback_trapped = sum(1 for aid in fallback_agent_ids if outcomes.get(aid) and outcomes[aid].status == "TRAPPED")
+    n_fallback_unfinished = sum(1 for aid in fallback_agent_ids if outcomes.get(aid) and outcomes[aid].status == "UNFINISHED")
+    n_fallback_never_inserted = sum(1 for aid in fallback_agent_ids if outcomes.get(aid) and outcomes[aid].status == "NEVER_INSERTED")
+    n_fallback_route_dropped = sum(1 for aid in fallback_agent_ids if outcomes.get(aid) and outcomes[aid].status == "ROUTE_DROPPED")
+    fallback_arrived_pct = 100.0 * n_fallback_arrived / n_fallback_dispatched if n_fallback_dispatched > 0 else 0.0
 
     # Agents already at exit at departure count as safe in SUMO too
     total_sumo_safe = len(sumo_arrived) + len(at_exit_agents)
@@ -345,7 +413,7 @@ def _run_pq_and_replay_impl(
     only_sumo_ids = sumo_safe_set - pq_safe_set
     neither_ids = all_agent_ids - (pq_safe_set | sumo_safe_set)
 
-    agent_edge_len = {r.agent_id: len(r.route_edges) for r in pq_res.agent_results}
+    agent_edge_len = {r.agent_id: len(r.route_edges) for r in pq_agent_results}
 
     both_departs = [agents_map[aid].depart_time_s for aid in both_safe_ids]
     both_edges = [agent_edge_len[aid] for aid in both_safe_ids]
@@ -369,6 +437,13 @@ def _run_pq_and_replay_impl(
         "sumo_unfinished_pct": sumo_unfinished_pct,
         "sumo_never_inserted_pct": sumo_never_inserted_pct,
         "sumo_route_dropped_pct": sumo_route_dropped_pct,
+        "n_fallback_dispatched": n_fallback_dispatched,
+        "n_fallback_arrived": n_fallback_arrived,
+        "n_fallback_trapped": n_fallback_trapped,
+        "n_fallback_unfinished": n_fallback_unfinished,
+        "n_fallback_never_inserted": n_fallback_never_inserted,
+        "n_fallback_route_dropped": n_fallback_route_dropped,
+        "fallback_arrived_pct": fallback_arrived_pct,
         "n_uturn_pairs_removed": sanitizer_stats.n_uturn_pairs_removed if sanitizer_stats else 0,
         "n_repaired": sanitizer_stats.n_repaired if sanitizer_stats else 0,
         "n_route_dropped": n_route_dropped,
@@ -508,6 +583,8 @@ def aggregate_results(
                 "pq_safe_pct", "sumo_safe_pct", "sumo_trapped_pct",
                 "sumo_unfinished_pct", "sumo_never_inserted_pct",
                 "sumo_route_dropped_pct",
+                "n_fallback_dispatched", "n_fallback_arrived", "n_fallback_trapped",
+                "fallback_arrived_pct",
                 "n_uturn_pairs_removed", "n_repaired", "n_route_dropped", "n_agents_affected",
                 "sumo_mean_evac_s", "sumo_p90_evac_s",
                 "pq_mean_evac_s", "pq_p90_evac_s",
@@ -542,6 +619,7 @@ def aggregate_results(
         "demand", "router_name",
         "pq_safe_pct_mean", "sumo_safe_pct_mean",
         "sumo_trapped_pct_mean", "sumo_unfinished_pct_mean", "sumo_never_inserted_pct_mean",
+        "n_fallback_dispatched_mean", "fallback_arrived_pct_mean",
         "sumo_mean_evac_common_s_mean", "sumo_p90_evac_common_s_mean",
         "pq_mean_evac_common_s_mean", "pq_p90_evac_common_s_mean",
         "sumo_mean_waiting_s_mean", "sumo_mean_time_loss_s_mean",
@@ -556,6 +634,8 @@ def aggregate_results(
         "sumo_trapped_pct_mean": "Trapped%",
         "sumo_unfinished_pct_mean": "Unfin%",
         "sumo_never_inserted_pct_mean": "NeverIns%",
+        "n_fallback_dispatched_mean": "FB Disp",
+        "fallback_arrived_pct_mean": "FB Arr%",
         "sumo_mean_evac_common_s_mean": "SUMO Evac(s)",
         "sumo_p90_evac_common_s_mean": "SUMO p90(s)",
         "pq_mean_evac_common_s_mean": "PQ Evac(s)",
@@ -655,6 +735,43 @@ def aggregate_results(
         pq_rank = sub.sort_values("pq_safe_pct_mean", ascending=False)["router_name"].tolist()
         sumo_rank = sub.sort_values("sumo_safe_pct_mean", ascending=False)["router_name"].tolist()
         print(f"  Demand {demand}: PQ rank: {pq_rank} | SUMO rank: {sumo_rank}")
+
+    # Side-by-side comparison table: Normal (Task 8b) vs Dispatch-All (Task 8c)
+    task8_summary_path = PROJECT_ROOT / "outputs" / "task8" / "summary.csv"
+    if task8_summary_path.exists():
+        try:
+            task8_df = pd.read_csv(task8_summary_path)
+            print("\n" + "=" * 110)
+            print("SIDE-BY-SIDE COMPARISON: NORMAL REPLAY (Task 8b) vs DISPATCH-ALL (Task 8c)")
+            print("=" * 110)
+            side_by_side_rows = []
+            for demand in demand_levels:
+                for router in routers:
+                    sub_curr = summary_df[(summary_df["demand"] == demand) & (summary_df["router_name"] == router)]
+                    sub_t8 = task8_df[(task8_df["demand"] == demand) & (task8_df["router_name"] == router)]
+                    if sub_curr.empty:
+                        continue
+                    disp_safe = float(sub_curr["sumo_safe_pct_mean"].iloc[0])
+                    norm_safe = float(sub_t8["sumo_safe_pct_mean"].iloc[0]) if not sub_t8.empty else float("nan")
+                    diff_pp = disp_safe - norm_safe if not math.isnan(norm_safe) else float("nan")
+                    fb_disp = float(sub_curr["n_fallback_dispatched_mean"].iloc[0]) if "n_fallback_dispatched_mean" in sub_curr.columns else 0.0
+                    fb_arr_pct = float(sub_curr["fallback_arrived_pct_mean"].iloc[0]) if "fallback_arrived_pct_mean" in sub_curr.columns else 0.0
+
+                    side_by_side_rows.append({
+                        "Demand": demand,
+                        "Router": router,
+                        "Normal Safe%": f"{norm_safe:.2f}%" if not math.isnan(norm_safe) else "N/A",
+                        "DispAll Safe%": f"{disp_safe:.2f}%",
+                        "Diff (pp)": f"{diff_pp:+.2f} pp" if not math.isnan(diff_pp) else "N/A",
+                        "Fallback Disp": f"{fb_disp:.1f}",
+                        "Fallback Arr%": f"{fb_arr_pct:.1f}%",
+                    })
+            if side_by_side_rows:
+                sbs_df = pd.DataFrame(side_by_side_rows)
+                print(sbs_df.to_string(index=False))
+                sbs_df.to_csv(out_dir / "side_by_side_comparison.csv", index=False)
+        except Exception as e:
+            print(f"[warn] Could not build side-by-side comparison: {e}")
 
     # Figure 1: sumo_vs_pq_safe.png
     _plot_safe_comparison(summary_df, demand_levels, routers, out_dir)
@@ -757,6 +874,12 @@ def main() -> None:
     parser.add_argument("--analyze-only", action="store_true", help="Aggregate existing results only")
     parser.add_argument("--unmatched", action="store_true", help="Use net_unmatched.net.xml")
     parser.add_argument(
+        "--dispatch-all",
+        action="store_true",
+        default=False,
+        help="Dispatch infeasible agents via shortest path on SUMO net (Task 8c)",
+    )
+    parser.add_argument(
         "--only",
         nargs=3,
         metavar=("DEMAND", "SEED", "ROUTER"),
@@ -771,6 +894,9 @@ def main() -> None:
     sumo_cfg = load_config(PROJECT_ROOT / args.sumo_config, SumoConfig)
     exp_cfg = load_config(PROJECT_ROOT / args.exp_config, SumoExperimentConfig)
 
+    if args.dispatch_all:
+        exp_cfg = replace(exp_cfg, dispatch_all=True)
+
     # CoordinatedConfig (may not exist in all setups)
     coord_path = PROJECT_ROOT / args.coord_config
     if coord_path.exists():
@@ -779,7 +905,14 @@ def main() -> None:
         coord_cfg = CoordinatedConfig()
 
     workers = args.workers if args.workers is not None else exp_cfg.workers
-    out_dir = PROJECT_ROOT / exp_cfg.output_dir
+
+    if exp_cfg.dispatch_all:
+        if exp_cfg.output_dir == "outputs/task8":
+            exp_cfg = replace(exp_cfg, output_dir="outputs/task8_dispatch_all")
+        out_dir = PROJECT_ROOT / exp_cfg.output_dir
+    else:
+        out_dir = PROJECT_ROOT / exp_cfg.output_dir
+
     routes_dir = out_dir / "routes"
     sumo_dir = PROJECT_ROOT / sumo_cfg.sumo_dir
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,26 @@ class SumoNetCache:
                 "valid_connections": valid_connections,
                 "edge_nodes": edge_nodes,
             }
+
+        if "H_rev" not in cls._cache[resolved]:
+            import networkx as nx
+
+            net = cls._cache[resolved]["net"]
+            H_rev = nx.DiGraph()
+            for edge in net.getEdges():
+                eid = edge.getID()
+                fft = edge.getLength() / max(edge.getSpeed(), 0.1)
+                H_rev.add_node(eid, fft=fft)
+
+            for edge in net.getEdges():
+                eid = edge.getID()
+                for target in edge.getOutgoing():
+                    target_id = target.getID()
+                    target_fft = target.getLength() / max(target.getSpeed(), 0.1)
+                    H_rev.add_edge(target_id, eid, weight=target_fft)
+
+            cls._cache[resolved]["H_rev"] = H_rev
+
         return cls._cache[resolved]
 
     @classmethod
@@ -262,3 +282,87 @@ def sanitize_agent_routes(
     )
 
     return sanitized_pairs, dropped_agent_ids, stats
+
+
+def compute_sumo_fallback_routes(
+    net_path: str | Path,
+    agents: Sequence[Any],
+    exits: Sequence[int | str] | set[int | str],
+    edge_map_g2s: dict[str, str] | None = None,
+    G: Any = None,
+) -> dict[int, list[str]]:
+    """Compute shortest free-flow-time path on SUMO net from agent origins to nearest exit.
+
+    Parameters
+    ----------
+    net_path : str or Path
+        Path to compiled SUMO net.net.xml.
+    agents : Sequence[Evacuee]
+        Evacuee agents that need fallback routes.
+    exits : Sequence or set of int or str
+        Exit node IDs in the road network.
+    edge_map_g2s : dict, optional
+        Mapping 'u,v,k' -> SUMO edge id.
+    G : nx.MultiDiGraph, optional
+        Graph to look up outgoing edges if origin node not found in SUMO net.
+
+    Returns
+    -------
+    dict[int, list[str]]
+        Mapping agent_id -> list of SUMO edge IDs for the fallback route.
+    """
+    if not agents:
+        return {}
+
+    import networkx as nx
+
+    net_data = SumoNetCache.get(net_path)
+    net = net_data["net"]
+    H_rev = net_data["H_rev"].copy()
+
+    exit_node_strs = {str(x) for x in exits}
+    exit_edges = [
+        e.getID() for e in net.getEdges()
+        if e.getToNode().getID() in exit_node_strs
+    ]
+
+    if not exit_edges:
+        logger.warning("No exit edges found in SUMO network for given exits: %s", exits)
+        return {}
+
+    for ee in exit_edges:
+        H_rev.add_edge("__EXIT__", ee, weight=H_rev.nodes[ee]["fft"])
+
+    distances, paths = nx.single_source_dijkstra(H_rev, "__EXIT__", weight="weight")
+
+    fallback_routes: dict[int, list[str]] = {}
+    for a in agents:
+        orig_id_str = str(a.origin)
+        cand_edges: list[str] = []
+        if hasattr(net, "_id2node") and orig_id_str in net._id2node:
+            orig_node = net.getNode(orig_id_str)
+            cand_edges.extend(e.getID() for e in orig_node.getOutgoing())
+        elif hasattr(net, "getNode"):
+            try:
+                orig_node = net.getNode(orig_id_str)
+                if orig_node is not None:
+                    cand_edges.extend(e.getID() for e in orig_node.getOutgoing())
+            except Exception:
+                pass
+
+        if not cand_edges and G is not None and hasattr(G, "out_edges") and a.origin in G:
+            for _, v, k in G.out_edges(a.origin, keys=True):
+                if edge_map_g2s:
+                    seid = edge_map_g2s.get(f"{a.origin},{v},{k}")
+                    if seid:
+                        cand_edges.append(seid)
+
+        valid_cands = [e for e in cand_edges if e in distances]
+        if valid_cands:
+            best_edge = min(valid_cands, key=lambda e: distances[e])
+            # Reverse path and exclude '__EXIT__'
+            fwd_path = paths[best_edge][::-1][:-1]
+            if fwd_path:
+                fallback_routes[int(a.id)] = fwd_path
+
+    return fallback_routes
